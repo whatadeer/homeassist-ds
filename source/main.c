@@ -161,7 +161,14 @@ static float signin_field_y(int kind) {
 // `selected_index` are only ever touched by the main thread, and the
 // pending_* staging fields (written by the worker, read by the main thread)
 // are guarded by state_lock.
-#define WORKER_STACK_SIZE (32 * 1024)
+// Was 32KB, which was already too small for its own good: the OP_REFRESH
+// path stack-allocates ha_entity_t local_entities[MAX_ENTITIES] (23.8KB)
+// AND ha_area_entry_t areas[MAX_ENTITIES] (14.3KB) simultaneously - 37.2KB
+// on their own, before curl/mbedTLS/jansson's own stack usage for the
+// nested HTTPS calls. That overflowed straight into the guard page (a
+// real-hardware data abort; the emulator run that "passed" never reached
+// this path since it had no saved session to trigger a refresh with).
+#define WORKER_STACK_SIZE (128 * 1024)
 
 static LightLock state_lock;
 static Thread worker_thread = NULL;
