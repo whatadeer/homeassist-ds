@@ -17,10 +17,6 @@ endif
 
 TOPDIR ?= $(CURDIR)
 
-ifeq ($(wildcard $(TOPDIR)/source/config.h),)
-$(error source/config.h is missing. Copy source/config.h.example to source/config.h and fill in your Home Assistant URL/token)
-endif
-
 include $(DEVKITARM)/3ds_rules
 
 #---------------------------------------------------------------------------------

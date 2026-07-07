@@ -16,12 +16,6 @@ if ($Target -eq "3dsx") {
     $Target = ""
 }
 
-if (-not (Test-Path "$PSScriptRoot\source\config.h")) {
-    Write-Host "source/config.h not found." -ForegroundColor Yellow
-    Write-Host "Copy source/config.h.example to source/config.h and fill in your Home Assistant URL/token first." -ForegroundColor Yellow
-    exit 1
-}
-
 podman build -t ha3ds-builder -f "$PSScriptRoot\Containerfile" $PSScriptRoot
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
