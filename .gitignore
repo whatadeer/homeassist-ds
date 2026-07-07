@@ -1,0 +1,9 @@
+build/
+*.elf
+*.3dsx
+*.smdh
+*.cia
+*.map
+banner.bnr
+source/config.h
+.claude/

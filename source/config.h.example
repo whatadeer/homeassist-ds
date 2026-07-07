@@ -1,0 +1,25 @@
+#ifndef CONFIG_H
+#define CONFIG_H
+
+// Copy this file to config.h and fill in your details.
+// config.h is gitignored so your token never gets committed.
+
+// Base URL of your Home Assistant instance, reachable from the 3DS's Wi-Fi
+// network. No trailing slash.
+//
+// - Plain HTTP LAN instance:  "http://192.168.1.50:8123"
+// - HTTPS behind a real CA-signed cert (reverse proxy, Nabu Casa, etc.):
+//   "https://home.example.com" (no port needed if it's on the default 443)
+//
+// HTTPS requests are verified against data/cacert.bin (curl's Mozilla CA
+// bundle, embedded into the binary at build time - see README). A
+// self-signed cert will fail verification; there's no config knob to skip
+// that check because it would silently expose your long-lived token to
+// anyone on-path.
+#define HA_BASE_URL "http://CHANGE_ME:8123"
+
+// Home Assistant -> Profile (click your name, bottom left) -> Security tab
+// -> "Long-Lived Access Tokens" -> Create Token
+#define HA_TOKEN "CHANGE_ME"
+
+#endif
