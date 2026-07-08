@@ -21,6 +21,7 @@ typedef struct {
     float current_temp;       // attributes.current_temperature, 0 if not reported
     float target_temp;        // attributes.temperature (falls back to target_temp_low for range-mode thermostats)
     char area_name[HA_MAX_NAME]; // room/area name, "" if unassigned or not fetched - see ha_fetch_area_map
+    int is_group;              // 1 if attributes.entity_id (member list) is present - see parse_entity_fields
 } ha_entity_t;
 
 typedef struct {
@@ -98,9 +99,22 @@ int ha_fetch_states(ha_entity_t *out, int max_count);
 // or brightness change). Returns 0 on success, -1 on failure.
 int ha_fetch_single_state(const char *entity_id, ha_entity_t *out);
 
-// Calls POST /api/services/homeassistant/toggle for entity_id.
+// Toggles entity_id. current_state is the caller's last-known state ("on"/
+// "off", from ha_entity_t.state) - for domains with their own turn_on/
+// turn_off services (light, switch, fan, input_boolean), this decides the
+// direction itself and calls the explicit one directly, which is both
+// faster and more reliable than asking HA to decide via a toggle service:
+// no state-lookup-then-redispatch hop, and no dependence on the entity's own
+// (occasionally laggy, for polling/cloud-backed integrations) is_on. Pass ""
+// if the current state isn't known. is_group (ha_entity_t.is_group) opts out
+// of that direct dispatch even for those domains: a group's own state is an
+// aggregate over its members ("on" if any member is on) that can lag behind
+// a command longer than a single entity's does, making current_state less
+// trustworthy to decide direction from. Falls back to
+// POST /api/services/homeassistant/toggle for groups, unknown current_state,
+// and domains without a direct on/off pair (lock, climate, media_player).
 // Returns 0 on success (HTTP 200), -1 otherwise.
-int ha_toggle_entity(const char *entity_id);
+int ha_toggle_entity(const char *entity_id, const char *current_state, int is_group);
 
 // Calls POST /api/services/light/turn_on with brightness_pct (0-100) for
 // entity_id. Also turns the light on if it was off. Returns 0 on success

@@ -105,6 +105,15 @@ static void parse_entity_fields(json_t *item, const char *eid, ha_entity_t *out)
     strncpy(out->friendly_name, name_str ? name_str : eid, HA_MAX_NAME - 1);
     out->friendly_name[HA_MAX_NAME - 1] = '\0';
 
+    // HA's built-in Group platform (light/switch/fan/cover groups, however
+    // created - YAML, the Group helper, etc.) stamps attributes.entity_id
+    // with the member entity_id list; individual entities never have this
+    // attribute. A group's own state is an aggregate over those members and
+    // can lag behind a just-issued command longer than a single entity's
+    // does - see ha_toggle_entity()'s use of this.
+    json_t *jmembers = jattrs ? json_object_get(jattrs, "entity_id") : NULL;
+    out->is_group = json_is_array(jmembers) ? 1 : 0;
+
     // Not available from /api/states - filled in separately by
     // ha_fetch_area_map() and merged in by the caller, if at all.
     out->area_name[0] = '\0';
@@ -565,9 +574,40 @@ static int ha_post_service(const char *domain, const char *service, const char *
     return (http == 200) ? 0 : -1;
 }
 
-int ha_toggle_entity(const char *entity_id) {
+// Domains with their own turn_on/turn_off pair and simple "on"/"off" state,
+// so we can decide the direction ourselves from current_state instead of
+// asking HA to. Dispatching straight to <domain>.toggle (light.toggle, etc.)
+// was tried instead of this and reverted: that decides on/off from the
+// entity's own is_on property, which can lag behind the real device for some
+// integrations (polling-based devices, cloud-backed lights), so it got stuck
+// re-issuing "turn on" every press until some other command forced a state
+// resync. Deciding from current_state - the caller's last read of the
+// published state machine, the same value already trusted for display -
+// sidesteps that: worst case it's gone stale since the last fetch and we
+// issue a redundant turn_on/turn_off, which is a harmless no-op, not a stuck
+// toggle. cover/lock/climate/media_player aren't listed here (open/closed,
+// locked/unlocked, or no reliable on/off pair) and still go through
+// homeassistant.toggle below.
+static const char *const DIRECT_TOGGLE_DOMAINS[] = {
+    "light", "switch", "fan", "input_boolean",
+};
+#define NUM_DIRECT_TOGGLE_DOMAINS (sizeof(DIRECT_TOGGLE_DOMAINS) / sizeof(DIRECT_TOGGLE_DOMAINS[0]))
+
+int ha_toggle_entity(const char *entity_id, const char *current_state, int is_group) {
     char body[HA_MAX_ENTITY_ID + 32];
     snprintf(body, sizeof(body), "{\"entity_id\":\"%s\"}", entity_id);
+
+    const char *dot = strchr(entity_id, '.');
+    if (dot && current_state && current_state[0] && !is_group) {
+        size_t domain_len = (size_t)(dot - entity_id);
+        for (size_t i = 0; i < NUM_DIRECT_TOGGLE_DOMAINS; i++) {
+            if (strlen(DIRECT_TOGGLE_DOMAINS[i]) == domain_len &&
+                strncmp(DIRECT_TOGGLE_DOMAINS[i], entity_id, domain_len) == 0) {
+                const char *service = strcmp(current_state, "on") == 0 ? "turn_off" : "turn_on";
+                return ha_post_service(DIRECT_TOGGLE_DOMAINS[i], service, body);
+            }
+        }
+    }
     return ha_post_service("homeassistant", "toggle", body);
 }
 
