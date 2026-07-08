@@ -1,14 +1,20 @@
 #include "app_config.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define CONFIG_PATH "sdmc:/ha3ds.cfg"
 
-// Format: two lines - base URL, then refresh token. Plain text on the SD
-// card; anyone with physical card access could read it, same trust model
-// as every other homebrew app storing credentials (and the token is
-// revocable from the HA profile page at any time).
+// Format: three lines - base URL, refresh token, enabled-domains bitmask.
+// Plain text on the SD card; anyone with physical card access could read
+// it, same trust model as every other homebrew app storing credentials
+// (and the token is revocable from the HA profile page at any time).
+//
+// The third line was added after the first two shipped, so configs written
+// by older builds only have two lines - read_line() below just leaves the
+// mask blank in that case, and it's treated as "not set" -> all domains on,
+// matching the pre-Settings-screen behavior exactly.
 
 static void read_line(FILE *f, char *out, size_t out_size) {
     out[0] = '\0';
@@ -29,6 +35,10 @@ int app_config_load(app_config_t *cfg) {
 
     read_line(f, cfg->base_url, sizeof(cfg->base_url));
     read_line(f, cfg->refresh_token, sizeof(cfg->refresh_token));
+
+    char mask_line[16];
+    read_line(f, mask_line, sizeof(mask_line));
+    cfg->enabled_domains = mask_line[0] ? (unsigned int)strtoul(mask_line, NULL, 10) : HA_ALL_DOMAINS_MASK;
     fclose(f);
 
     return (cfg->base_url[0] && cfg->refresh_token[0]) ? 0 : -1;
@@ -40,7 +50,7 @@ int app_config_save(const app_config_t *cfg) {
         return -1;
     }
 
-    int ok = fprintf(f, "%s\n%s\n", cfg->base_url, cfg->refresh_token) > 0;
+    int ok = fprintf(f, "%s\n%s\n%u\n", cfg->base_url, cfg->refresh_token, cfg->enabled_domains) > 0;
     fclose(f);
     return ok ? 0 : -1;
 }

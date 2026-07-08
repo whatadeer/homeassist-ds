@@ -28,6 +28,15 @@ typedef struct {
     char area_name[HA_MAX_NAME];
 } ha_area_entry_t;
 
+// Domains ha_fetch_states() knows how to toggle, and which of them are
+// currently pulled - see ha_client_set_enabled_domains(). Bit i of a mask
+// corresponds to HA_DOMAINS[i]/HA_DOMAIN_LABELS[i]. Fixed order, used by the
+// Settings screen to list them and by app_config to persist the choice.
+#define HA_NUM_DOMAINS 8
+#define HA_ALL_DOMAINS_MASK ((1u << HA_NUM_DOMAINS) - 1)
+extern const char *const HA_DOMAINS[HA_NUM_DOMAINS];
+extern const char *const HA_DOMAIN_LABELS[HA_NUM_DOMAINS];
+
 // Must be called once after socInit(), before any other ha_* call.
 void ha_client_init(void);
 
@@ -40,6 +49,12 @@ void ha_client_exit(void);
 // token before any API call.
 void ha_client_set_base_url(const char *base_url);
 void ha_client_set_access_token(const char *token);
+
+// Restricts ha_fetch_states()/ha_fetch_area_map() to the domains whose bit
+// is set (see HA_DOMAINS/HA_ALL_DOMAINS_MASK above). Defaults to
+// HA_ALL_DOMAINS_MASK until called. Takes effect on the next fetch - it
+// doesn't touch entities already in memory.
+void ha_client_set_enabled_domains(unsigned int mask);
 
 // --- Sign-in (Home Assistant's frontend login flow over REST) ------------
 // All return 0 on success, -1 on failure unless noted.
@@ -72,10 +87,10 @@ int ha_auth_refresh(const char *refresh_token,
 
 // --- Entity API -----------------------------------------------------------
 
-// Fetches entities from GET /api/states, keeping only domains this remote
-// knows how to toggle (light, switch, fan, lock, cover, input_boolean,
-// climate, media_player). Fills at most max_count entries into out and
-// returns how many were written, or -1 on network/parse failure.
+// Fetches entities from GET /api/states, keeping only entities whose domain
+// is both one this remote knows how to toggle and currently enabled (see
+// ha_client_set_enabled_domains()). Fills at most max_count entries into out
+// and returns how many were written, or -1 on network/parse failure.
 int ha_fetch_states(ha_entity_t *out, int max_count);
 
 // Fetches just one entity from GET /api/states/<entity_id> - much cheaper

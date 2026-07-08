@@ -15,11 +15,20 @@
 
 // Domains homeassistant.toggle can meaningfully act on. Filters the (often
 // huge) /api/states response down to things worth showing on a small screen.
-static const char *SUPPORTED_DOMAINS[] = {
+// Declared in ha_client.h so main.c's Settings screen can list them.
+const char *const HA_DOMAINS[HA_NUM_DOMAINS] = {
     "light", "switch", "fan", "lock", "cover",
     "input_boolean", "climate", "media_player",
 };
-#define NUM_SUPPORTED_DOMAINS (sizeof(SUPPORTED_DOMAINS) / sizeof(SUPPORTED_DOMAINS[0]))
+const char *const HA_DOMAIN_LABELS[HA_NUM_DOMAINS] = {
+    "Lights", "Switches", "Fans", "Locks", "Covers",
+    "Input Booleans", "Climate", "Media Players",
+};
+
+// Which of HA_DOMAINS to actually pull - see ha_client_set_enabled_domains().
+// All on by default so a fresh install (or one predating this setting)
+// behaves exactly like before it existed.
+static unsigned int g_enabled_domains = HA_ALL_DOMAINS_MASK;
 
 // Reused across every request instead of curl_easy_init()/cleanup() per
 // call - keeping one handle alive lets libcurl reuse the TCP+TLS connection
@@ -33,6 +42,10 @@ static CURL *g_curl = NULL;
 // compile-time config.h.
 static char g_base_url[HA_MAX_URL] = "";
 static char g_access_token[HA_MAX_TOKEN] = "";
+
+void ha_client_set_enabled_domains(unsigned int mask) {
+    g_enabled_domains = mask;
+}
 
 struct membuf {
     char *data;
@@ -62,9 +75,12 @@ static int is_supported_domain(const char *entity_id) {
     }
     size_t domain_len = (size_t)(dot - entity_id);
 
-    for (size_t i = 0; i < NUM_SUPPORTED_DOMAINS; i++) {
-        if (strlen(SUPPORTED_DOMAINS[i]) == domain_len &&
-            strncmp(SUPPORTED_DOMAINS[i], entity_id, domain_len) == 0) {
+    for (size_t i = 0; i < HA_NUM_DOMAINS; i++) {
+        if (!(g_enabled_domains & (1u << i))) {
+            continue;
+        }
+        if (strlen(HA_DOMAINS[i]) == domain_len &&
+            strncmp(HA_DOMAINS[i], entity_id, domain_len) == 0) {
             return 1;
         }
     }
@@ -579,15 +595,31 @@ int ha_fetch_area_map(ha_area_entry_t *out, int max_count) {
         return -1;
     }
 
-    // Filters to our supported domains server-side, so the response is a
-    // short "entity_id|area_name" list instead of every entity on the
-    // instance (sensors, automations, scripts, ...). area_name() is a
-    // long-standing built-in HA template function; empty string if the
-    // entity has no area assigned.
-    static const char *tmpl =
-        "{% set domains = ['light','switch','fan','lock','cover','input_boolean','climate','media_player'] %}"
-        "{% for s in states %}{% if s.domain in domains %}{{ s.entity_id }}|{{ area_name(s.entity_id) or '' }}\n"
-        "{% endif %}{% endfor %}";
+    // Filters to our currently-enabled domains server-side (same set
+    // ha_fetch_states() just fetched), so the response is a short
+    // "entity_id|area_name" list instead of every entity on the instance
+    // (sensors, automations, scripts, ...), and so a large instance with
+    // several domains toggled off in Settings doesn't burn the max_count
+    // budget on area data for entities that won't even be displayed.
+    // area_name() is a long-standing built-in HA template function; empty
+    // string if the entity has no area assigned.
+    char domains_list[128];
+    size_t off = 0;
+    int first = 1;
+    for (int i = 0; i < HA_NUM_DOMAINS && off < sizeof(domains_list); i++) {
+        if (!(g_enabled_domains & (1u << i))) {
+            continue;
+        }
+        off += (size_t)snprintf(domains_list + off, sizeof(domains_list) - off,
+            "%s'%s'", first ? "" : ",", HA_DOMAINS[i]);
+        first = 0;
+    }
+
+    char tmpl[512];
+    snprintf(tmpl, sizeof(tmpl),
+        "{%% set domains = [%s] %%}"
+        "{%% for s in states %%}{%% if s.domain in domains %%}{{ s.entity_id }}|{{ area_name(s.entity_id) or '' }}\n"
+        "{%% endif %%}{%% endfor %%}", domains_list);
 
     json_t *req = json_pack("{s:s}", "template", tmpl);
     if (!req) {
