@@ -1,0 +1,51 @@
+name: Build
+
+# Mirrors the local workflow in build.ps1/Containerfile: build the
+# devkitARM+makerom+bannertool image, then `make cia` inside it.
+#
+# - push/PR: build only, upload ha3ds.cia/.3dsx as a workflow artifact
+#   (Actions tab -> this run -> Artifacts) so a build is always verified
+#   and grabbable without cutting a release.
+# - tag push (v*): also publish a GitHub Release with the .cia attached,
+#   so FBI's "Remote install" can pull it by URL.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build builder image
+        run: docker build -t ha3ds-builder -f Containerfile .
+
+      - name: Build CIA
+        run: docker run --rm -v ${{ github.workspace }}:/project ha3ds-builder make cia
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ha3ds-build
+          path: |
+            ha3ds.cia
+            ha3ds.3dsx
+          if-no-files-found: error
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            ha3ds.cia ha3ds.3dsx \
+            --title "${{ github.ref_name }}" \
+            --generate-notes
