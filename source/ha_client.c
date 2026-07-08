@@ -122,7 +122,14 @@ static void parse_entity_fields(json_t *item, const char *eid, ha_entity_t *out)
     // "onoff" (every non-onoff color mode implies brightness support in
     // HA's model), or the legacy SUPPORT_BRIGHTNESS bit (0x1) is set in
     // supported_features for integrations that predate color modes.
+    // supports_color/supports_color_temp come from the same list: "hs",
+    // "xy", "rgb", "rgbw", and "rgbww" all mean the light takes an
+    // rgb_color; "color_temp" means it takes a color_temp_kelvin. A light
+    // can have both (most CCT+RGB bulbs report two modes and switch between
+    // them depending on which parameter was last set).
     out->supports_brightness = 0;
+    out->supports_color = 0;
+    out->supports_color_temp = 0;
     out->brightness_pct = 100;
     if (jattrs) {
         json_t *jmodes = json_object_get(jattrs, "supported_color_modes");
@@ -131,9 +138,18 @@ static void parse_entity_fields(json_t *item, const char *eid, ha_entity_t *out)
             for (size_t m = 0; m < n_modes; m++) {
                 json_t *jmode = json_array_get(jmodes, m);
                 const char *mode_str = json_is_string(jmode) ? json_string_value(jmode) : NULL;
-                if (mode_str && strcmp(mode_str, "onoff") != 0) {
+                if (!mode_str) {
+                    continue;
+                }
+                if (strcmp(mode_str, "onoff") != 0) {
                     out->supports_brightness = 1;
-                    break;
+                }
+                if (strcmp(mode_str, "hs") == 0 || strcmp(mode_str, "xy") == 0 ||
+                    strcmp(mode_str, "rgb") == 0 || strcmp(mode_str, "rgbw") == 0 ||
+                    strcmp(mode_str, "rgbww") == 0) {
+                    out->supports_color = 1;
+                } else if (strcmp(mode_str, "color_temp") == 0) {
+                    out->supports_color_temp = 1;
                 }
             }
         }
@@ -628,6 +644,18 @@ int ha_set_temperature(const char *entity_id, float target_temp) {
     char body[HA_MAX_ENTITY_ID + 64];
     snprintf(body, sizeof(body), "{\"entity_id\":\"%s\",\"temperature\":%.1f}", entity_id, (double)target_temp);
     return ha_post_service("climate", "set_temperature", body);
+}
+
+int ha_set_color(const char *entity_id, int r, int g, int b) {
+    char body[HA_MAX_ENTITY_ID + 64];
+    snprintf(body, sizeof(body), "{\"entity_id\":\"%s\",\"rgb_color\":[%d,%d,%d]}", entity_id, r, g, b);
+    return ha_post_service("light", "turn_on", body);
+}
+
+int ha_set_color_temp(const char *entity_id, int kelvin) {
+    char body[HA_MAX_ENTITY_ID + 64];
+    snprintf(body, sizeof(body), "{\"entity_id\":\"%s\",\"color_temp_kelvin\":%d}", entity_id, kelvin);
+    return ha_post_service("light", "turn_on", body);
 }
 
 int ha_fetch_area_map(ha_area_entry_t *out, int max_count) {

@@ -17,6 +17,8 @@ typedef struct {
     char state[HA_MAX_STATE];
     int supports_brightness;  // 1 if this is a dimmable light
     int brightness_pct;       // 0-100, last known brightness (only meaningful if supports_brightness)
+    int supports_color;       // 1 if this light takes an rgb_color (hs/xy/rgb/rgbw/rgbww mode)
+    int supports_color_temp;  // 1 if this light takes a color_temp_kelvin (color_temp mode)
     int is_climate;           // 1 if this is a climate/thermostat entity
     float current_temp;       // attributes.current_temperature, 0 if not reported
     float target_temp;        // attributes.temperature (falls back to target_temp_low for range-mode thermostats)
@@ -125,6 +127,16 @@ int ha_set_brightness(const char *entity_id, int brightness_pct);
 // temperature (in whatever unit the HA instance is configured for) for
 // entity_id. Returns 0 on success (HTTP 200), -1 otherwise.
 int ha_set_temperature(const char *entity_id, float target_temp);
+
+// Calls POST /api/services/light/turn_on with rgb_color:[r,g,b] (0-255 each)
+// for entity_id. Only meaningful if supports_color. Returns 0 on success
+// (HTTP 200), -1 otherwise.
+int ha_set_color(const char *entity_id, int r, int g, int b);
+
+// Calls POST /api/services/light/turn_on with color_temp_kelvin for
+// entity_id. Only meaningful if supports_color_temp. Returns 0 on success
+// (HTTP 200), -1 otherwise.
+int ha_set_color_temp(const char *entity_id, int kelvin);
 
 // Fetches an entity_id -> area/room name mapping via a Jinja template call
 // (HA's REST API has no direct area-registry endpoint; this uses the
