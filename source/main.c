@@ -24,10 +24,25 @@
 #define SOC_ALIGN 0x1000
 #define SOC_BUFFERSIZE 0x100000
 #define MAX_ENTITIES 64
+// Grouped view interleaves a non-selectable header row before each area's
+// first entity, so the visible list can hold up to 2x the raw entity count
+// (worst case: every entity in its own area).
+#define MAX_VISIBLE_ROWS (MAX_ENTITIES * 2)
+// Sentinel stored in visible_indices[] for a header row - never a valid
+// entities[] index.
+#define ROW_IS_HEADER (-1)
+// Fallback header/group label for entities with no assigned area. Deliberately
+// not "Other" - a real Home Assistant area can legitimately be named "Other",
+// which would otherwise show two disconnected header rows with the same text.
+#define AREA_UNASSIGNED_LABEL "Ungrouped"
 #define VISIBLE_ROWS 8
 #define ROW_HEIGHT 24
 #define FILTER_BOX_HEIGHT 22
-#define LIST_TOP_Y FILTER_BOX_HEIGHT
+// Height of the persistent "current room" bar shown between the filter box
+// and the list - see sticky_room_bar_active(). Doesn't consume one of the
+// VISIBLE_ROWS row slots, just pushes the list's start Y down, so scrolling
+// math (list positions, not pixels) is unaffected by whether it's shown.
+#define STICKY_ROOM_BAR_HEIGHT 16.0f
 #define FILTER_MAX_LEN 32
 
 static u32 *soc_buffer = NULL;
@@ -39,15 +54,22 @@ static int selected_index = 0;
 static char status_msg[128] = "Connecting...";
 
 // Entities matching filter_text (case-insensitive substring of name or
-// entity_id), in original order. selected_index/scroll_offset are positions
+// entity_id), in original order, interleaved with ROW_IS_HEADER sentinels
+// when group_by_room is on (one before each area's first entity). Header
+// rows are never selectable. selected_index/scroll_offset are positions
 // into THIS list, not directly into `entities` - always go through
 // visible_indices[] to get the real entities[] index.
 static char filter_text[FILTER_MAX_LEN] = "";
-static int visible_indices[MAX_ENTITIES];
+static int visible_indices[MAX_VISIBLE_ROWS];
 static int visible_count = 0;
+// Count of real entity rows in visible_indices[] (visible_count minus header
+// rows) - what the filter box's "(shown/total)" text should report, since
+// visible_count itself includes non-entity header rows when grouped.
+static int visible_entity_count = 0;
 
 // Toggled by X: sort entities[] by (area, name) instead of just name, and
-// prefix each row's display name with its area. Room data comes from a
+// insert a header row before each area's entities so grouping reads as
+// real sections instead of a same-list resort. Room data comes from a
 // separate template-based fetch (ha_fetch_area_map) merged in after every
 // full refresh - see worker_thread_func's OP_REFRESH branch.
 static int group_by_room = 0;
@@ -59,18 +81,42 @@ static int group_by_room = 0;
 // is in flight); token_expires_at is also updated by the worker thread via
 // ensure_access_token - safe for the same reason: the wizard never runs
 // concurrently with a worker.
-static app_config_t app_cfg;
+// enabled_domains defaults to "everything on" so a fresh install (before
+// any config file exists, and thus before app_config_load ever runs) still
+// fetches every domain, same as before this setting existed.
+static app_config_t app_cfg = { .enabled_domains = HA_ALL_DOMAINS_MASK };
 static time_t token_expires_at = 0;
 static int signed_in = 0;
 
-// The app is either showing the entity list or the sign-in form - never
-// both. Both share the same render loop/frame cadence; only the drawing
-// and input-handling branch on this.
+// The app is always showing exactly one of these three screens - they share
+// the same render loop/frame cadence; only the drawing and input-handling
+// branch on this.
 typedef enum {
     APP_MODE_MAIN,
     APP_MODE_SIGNIN,
+    APP_MODE_SETTINGS,
+    APP_MODE_COLOR,
 } app_mode_t;
 static app_mode_t app_mode = APP_MODE_MAIN;
+
+// --- Settings screen state (which entity-type domains to pull) ------------
+// Opened from the main list with START. settings_mask_on_entry lets
+// settings_exit() tell whether anything actually changed, so it only
+// spends a refresh (and the network round-trip that comes with it) when
+// needed.
+static int settings_cursor = 0;
+static unsigned int settings_mask_on_entry = 0;
+static char settings_status[64] = "";
+
+// --- Color screen state (rgb_color / color_temp_kelvin presets) -----------
+// Opened from the main list with B on a light that supports_color or
+// supports_color_temp. Captured at entry (rather than re-deriving from
+// selected_index each frame) since entities[] can in principle be replaced
+// by a refresh while this screen is open.
+static char color_target_entity_id[HA_MAX_ENTITY_ID] = "";
+static char color_target_name[HA_MAX_NAME] = "";
+static int color_target_supports_color = 0;
+static int color_target_supports_color_temp = 0;
 
 // --- Sign-in form state ----------------------------------------------------
 // A persistent on-screen form (URL/username/password/[2FA]) instead of a
@@ -180,6 +226,8 @@ enum {
     OP_TOGGLE = 1,
     OP_SET_BRIGHTNESS = 2,
     OP_SET_TEMPERATURE = 3,
+    OP_SET_COLOR = 4,
+    OP_SET_COLOR_TEMP = 5,
 };
 
 static ha_entity_t pending_entities[MAX_ENTITIES];
@@ -189,6 +237,16 @@ static char pending_entity_id[HA_MAX_ENTITY_ID];
 static int pending_op = OP_REFRESH;
 static int pending_brightness_pct = 0;
 static float pending_target_temp = 0.0f;
+// r/g/b (0-255 each) for OP_SET_COLOR, kelvin for OP_SET_COLOR_TEMP - see
+// start_worker(), which packs r/g/b into its int_param to avoid growing its
+// signature further.
+static int pending_color_r = 0, pending_color_g = 0, pending_color_b = 0;
+static int pending_color_kelvin = 0;
+// entity_id's state/is_group as of the moment OP_TOGGLE was kicked off, so
+// ha_toggle_entity() can decide on/off itself instead of asking HA to -
+// see its doc comment in ha_client.h.
+static char pending_toggle_state[HA_MAX_STATE];
+static int pending_toggle_is_group = 0;
 
 // After a toggle/brightness change, only that one entity actually changed -
 // the worker fetches just it (ha_fetch_single_state) instead of the full
@@ -227,6 +285,48 @@ static void clamp_selection(void) {
     if (selected_index >= scroll_offset + VISIBLE_ROWS) {
         scroll_offset = selected_index - VISIBLE_ROWS + 1;
     }
+}
+
+// Walks from pos in the given direction until landing on a non-header slot
+// (or running off the list). Shared by move_selection() and
+// rebuild_visible_list() so "never select a header row" has one
+// implementation instead of two that can drift apart.
+static int first_selectable_from(int pos, int dir) {
+    while (pos >= 0 && pos < visible_count && visible_indices[pos] == ROW_IS_HEADER) {
+        pos += dir;
+    }
+    return pos;
+}
+
+// Moves selected_index by dir (+-1), stepping over any header row so
+// Up/Down always lands on a real entity. If dir runs off the end of the
+// list without finding one, the selection is left where it was.
+static void move_selection(int dir) {
+    int pos = first_selectable_from(selected_index + dir, dir);
+    if (pos >= 0 && pos < visible_count) {
+        selected_index = pos;
+    }
+    clamp_selection();
+}
+
+// True when the top of the current scroll window is mid-group - the
+// area's own header has scrolled above the visible list - so grouping
+// would otherwise show zero room context on screen. Not true when
+// scroll_offset lands exactly on a header row: that header already shows
+// the same text inline, so the bar would just repeat it.
+static int sticky_room_bar_active(void) {
+    return group_by_room && scroll_offset >= 0 && scroll_offset < visible_count &&
+        visible_indices[scroll_offset] != ROW_IS_HEADER;
+}
+
+// Y where the entity list starts. Pushed down by STICKY_ROOM_BAR_HEIGHT
+// when sticky_room_bar_active() so the bar has its own space without
+// stealing one of the VISIBLE_ROWS row slots - list positions (what
+// clamp_selection/scroll_offset track) are pixel-agnostic, so this can
+// change from one frame to the next as scroll_offset moves without any
+// scrolling math needing to know about it.
+static float list_top_y(void) {
+    return FILTER_BOX_HEIGHT + (sticky_room_bar_active() ? STICKY_ROOM_BAR_HEIGHT : 0.0f);
 }
 
 // Case-insensitive string comparison - not relying on newlib providing
@@ -273,6 +373,15 @@ static int compare_entity_area_then_name_ci(const void *a, const void *b) {
         return area_cmp;
     }
     return ci_strcmp(ea->friendly_name, eb->friendly_name);
+}
+
+// Display label for an entity's area/room: its own area_name, or
+// AREA_UNASSIGNED_LABEL if it has none. Only for display - grouping
+// decisions in rebuild_visible_list compare the raw area_name instead, so a
+// real area actually named AREA_UNASSIGNED_LABEL can't merge with the
+// no-area bucket.
+static const char *entity_area_label(const ha_entity_t *e) {
+    return e->area_name[0] ? e->area_name : AREA_UNASSIGNED_LABEL;
 }
 
 // Sorts entities[] in place using whichever order is currently selected.
@@ -325,7 +434,8 @@ static int str_contains_ci(const char *haystack, const char *needle) {
 // entities[] with a fresh fetch.
 static void capture_selected_id(char *buf, size_t bufsize) {
     buf[0] = '\0';
-    if (selected_index >= 0 && selected_index < visible_count) {
+    if (selected_index >= 0 && selected_index < visible_count &&
+        visible_indices[selected_index] != ROW_IS_HEADER) {
         strncpy(buf, entities[visible_indices[selected_index]].entity_id, bufsize - 1);
         buf[bufsize - 1] = '\0';
     }
@@ -333,29 +443,57 @@ static void capture_selected_id(char *buf, size_t bufsize) {
 
 // Recomputes visible_indices[] from entities[]/filter_text, re-selecting
 // preserved_id (captured by the caller via capture_selected_id) if it's
-// still in the filtered list, else resetting to row 0. The caller captures
-// the id rather than this function doing it because entities[] may have
-// been replaced (fresh fetch, possibly reordered) between capture and
-// rebuild - indexing the new array through the old visible_indices[] would
-// preserve the wrong entity.
+// still in the filtered list, else resetting to the first real row. The
+// caller captures the id rather than this function doing it because
+// entities[] may have been replaced (fresh fetch, possibly reordered)
+// between capture and rebuild - indexing the new array through the old
+// visible_indices[] would preserve the wrong entity.
+//
+// When group_by_room is on, a ROW_IS_HEADER sentinel is inserted right
+// before the first entity of each area (entities[] is assumed already
+// sorted by (area, name) - see sort_entities()), so a run of same-area
+// entities in the filtered list stays contiguous and gets exactly one
+// header.
 static void rebuild_visible_list(const char *preserved_id) {
     visible_count = 0;
+    visible_entity_count = 0;
+    // Raw area_name of the last entity added (may be "" for unassigned) -
+    // compared case-insensitively, matching sort_entities()'s comparator, so
+    // a header boundary is never split or merged by casing alone. Compared
+    // on the raw name rather than entity_area_label()'s resolved text, so a
+    // real area actually named AREA_UNASSIGNED_LABEL can't be confused with
+    // the no-area bucket.
+    char last_area[HA_MAX_NAME];
+    int have_last_area = 0;
     for (int i = 0; i < entity_count; i++) {
-        if (str_contains_ci(entities[i].friendly_name, filter_text) ||
-            str_contains_ci(entities[i].entity_id, filter_text)) {
-            visible_indices[visible_count++] = i;
+        if (!(str_contains_ci(entities[i].friendly_name, filter_text) ||
+              str_contains_ci(entities[i].entity_id, filter_text))) {
+            continue;
         }
+        if (group_by_room) {
+            const char *raw_area = entities[i].area_name;
+            if (!have_last_area || ci_strcmp(raw_area, last_area) != 0) {
+                visible_indices[visible_count++] = ROW_IS_HEADER;
+                strncpy(last_area, raw_area, sizeof(last_area) - 1);
+                last_area[sizeof(last_area) - 1] = '\0';
+                have_last_area = 1;
+            }
+        }
+        visible_indices[visible_count++] = i;
+        visible_entity_count++;
     }
 
     selected_index = 0;
     if (preserved_id[0]) {
         for (int i = 0; i < visible_count; i++) {
-            if (strcmp(entities[visible_indices[i]].entity_id, preserved_id) == 0) {
+            if (visible_indices[i] != ROW_IS_HEADER &&
+                strcmp(entities[visible_indices[i]].entity_id, preserved_id) == 0) {
                 selected_index = i;
                 break;
             }
         }
     }
+    selected_index = first_selectable_from(selected_index, 1);
 
     clamp_selection();
 }
@@ -405,17 +543,26 @@ static void worker_thread_func(void *arg) {
     }
 
     if (pending_op == OP_TOGGLE) {
-        LOG("worker: toggling %s", pending_entity_id);
-        ha_toggle_entity(pending_entity_id);
+        LOG("worker: toggling %s (was %s, group=%d)", pending_entity_id, pending_toggle_state,
+            pending_toggle_is_group);
+        ha_toggle_entity(pending_entity_id, pending_toggle_state, pending_toggle_is_group);
     } else if (pending_op == OP_SET_BRIGHTNESS) {
         LOG("worker: setting brightness %s -> %d%%", pending_entity_id, pending_brightness_pct);
         ha_set_brightness(pending_entity_id, pending_brightness_pct);
     } else if (pending_op == OP_SET_TEMPERATURE) {
         LOG("worker: setting temperature %s -> %.1f", pending_entity_id, (double)pending_target_temp);
         ha_set_temperature(pending_entity_id, pending_target_temp);
+    } else if (pending_op == OP_SET_COLOR) {
+        LOG("worker: setting color %s -> rgb(%d,%d,%d)", pending_entity_id,
+            pending_color_r, pending_color_g, pending_color_b);
+        ha_set_color(pending_entity_id, pending_color_r, pending_color_g, pending_color_b);
+    } else if (pending_op == OP_SET_COLOR_TEMP) {
+        LOG("worker: setting color temp %s -> %dK", pending_entity_id, pending_color_kelvin);
+        ha_set_color_temp(pending_entity_id, pending_color_kelvin);
     }
 
-    if (pending_op == OP_TOGGLE || pending_op == OP_SET_BRIGHTNESS || pending_op == OP_SET_TEMPERATURE) {
+    if (pending_op == OP_TOGGLE || pending_op == OP_SET_BRIGHTNESS || pending_op == OP_SET_TEMPERATURE ||
+        pending_op == OP_SET_COLOR || pending_op == OP_SET_COLOR_TEMP) {
         ha_entity_t updated;
         int ok = ha_fetch_single_state(pending_entity_id, &updated) == 0;
         LOG("worker: single-entity refresh ok=%d", ok);
@@ -472,12 +619,17 @@ static void worker_thread_func(void *arg) {
     LightLock_Unlock(&state_lock);
 }
 
-// Kicks off a refresh, toggle-then-refresh, set-brightness-then-refresh, or
-// set-temperature-then-refresh on the worker thread. No-ops if one is
-// already running - only one network op is ever in flight at a time.
-// int_param is brightness_pct for OP_SET_BRIGHTNESS; temp_param is the
-// target temperature for OP_SET_TEMPERATURE. Unused for other ops.
-static void start_worker(int op, const char *entity_id, int int_param, float temp_param) {
+// Kicks off a refresh, toggle-then-refresh, set-brightness-then-refresh,
+// set-temperature-then-refresh, or set-color(-temp)-then-refresh on the
+// worker thread. No-ops if one is already running - only one network op is
+// ever in flight at a time. int_param is brightness_pct for
+// OP_SET_BRIGHTNESS, kelvin for OP_SET_COLOR_TEMP, or r/g/b packed as
+// (r<<16)|(g<<8)|b for OP_SET_COLOR (avoids growing this signature further
+// for a 3-int param used by only one op); temp_param is the target
+// temperature for OP_SET_TEMPERATURE; current_state/is_group describe the
+// entity (for OP_TOGGLE - see ha_toggle_entity()). Unused for other ops.
+static void start_worker(int op, const char *entity_id, int int_param, float temp_param,
+                          const char *current_state, int is_group) {
     if (network_busy) {
         return;
     }
@@ -487,9 +639,15 @@ static void start_worker(int op, const char *entity_id, int int_param, float tem
     }
 
     pending_op = op;
-    if (op == OP_TOGGLE || op == OP_SET_BRIGHTNESS || op == OP_SET_TEMPERATURE) {
+    if (op == OP_TOGGLE || op == OP_SET_BRIGHTNESS || op == OP_SET_TEMPERATURE ||
+        op == OP_SET_COLOR || op == OP_SET_COLOR_TEMP) {
         strncpy(pending_entity_id, entity_id, sizeof(pending_entity_id) - 1);
         pending_entity_id[sizeof(pending_entity_id) - 1] = '\0';
+    }
+    if (op == OP_TOGGLE) {
+        strncpy(pending_toggle_state, current_state ? current_state : "", sizeof(pending_toggle_state) - 1);
+        pending_toggle_state[sizeof(pending_toggle_state) - 1] = '\0';
+        pending_toggle_is_group = is_group;
     }
     if (op == OP_SET_BRIGHTNESS) {
         pending_brightness_pct = int_param;
@@ -497,12 +655,21 @@ static void start_worker(int op, const char *entity_id, int int_param, float tem
     if (op == OP_SET_TEMPERATURE) {
         pending_target_temp = temp_param;
     }
+    if (op == OP_SET_COLOR) {
+        pending_color_r = (int_param >> 16) & 0xFF;
+        pending_color_g = (int_param >> 8) & 0xFF;
+        pending_color_b = int_param & 0xFF;
+    }
+    if (op == OP_SET_COLOR_TEMP) {
+        pending_color_kelvin = int_param;
+    }
 
     network_busy = true;
     worker_result_ready = false;
     const char *msg = (op == OP_TOGGLE) ? "Toggling..." :
         (op == OP_SET_BRIGHTNESS) ? "Adjusting brightness..." :
-        (op == OP_SET_TEMPERATURE) ? "Setting temperature..." : "Refreshing...";
+        (op == OP_SET_TEMPERATURE) ? "Setting temperature..." :
+        (op == OP_SET_COLOR || op == OP_SET_COLOR_TEMP) ? "Setting color..." : "Refreshing...";
     snprintf(status_msg, sizeof(status_msg), "%s", msg);
 
     s32 main_prio = 0;
@@ -552,9 +719,18 @@ static void poll_worker(void) {
     } else if (pending_single_valid) {
         // Patch just the one entity that changed, in place, wherever it
         // currently sits in the list - a toggle/dim never adds or removes
-        // rows, so entity_count/ordering are untouched.
+        // rows, so entity_count/ordering are untouched. pending_single_entity
+        // comes from ha_fetch_single_state(), which (unlike the OP_REFRESH
+        // path) never populates area_name - area data only comes from the
+        // separate ha_fetch_area_map() call merged in after a full refresh.
+        // Carry the entity's existing area_name over instead of overwriting
+        // it with the always-empty one, or a toggle/dim silently bumps the
+        // entity into the "Ungrouped" bucket until the next full refresh.
         for (int i = 0; i < entity_count; i++) {
             if (strcmp(entities[i].entity_id, pending_single_entity.entity_id) == 0) {
+                strncpy(pending_single_entity.area_name, entities[i].area_name,
+                    sizeof(pending_single_entity.area_name) - 1);
+                pending_single_entity.area_name[sizeof(pending_single_entity.area_name) - 1] = '\0';
                 entities[i] = pending_single_entity;
                 break;
             }
@@ -574,7 +750,7 @@ static void poll_worker(void) {
 // ICON_SIZE x ICON_SIZE square to draw within.
 #define ICON_SIZE 18.0f
 
-static void draw_domain_icon(const char *entity_id, float box_x, float box_y) {
+static void draw_domain_icon(const char *entity_id, float box_x, float box_y, int is_group) {
     const char *dot = strchr(entity_id, '.');
     size_t domain_len = dot ? (size_t)(dot - entity_id) : strlen(entity_id);
 
@@ -635,6 +811,20 @@ static void draw_domain_icon(const char *entity_id, float box_x, float box_y) {
     }
 
 #undef DOMAIN_IS
+
+    if (is_group) {
+        // Small corner badge: this row is a Home Assistant group (multiple
+        // member entities acting as one, e.g. "Den Lamps"), not an
+        // individual entity of the domain the base icon shows. Dark ring
+        // first so the badge stays legible over any icon color, then the
+        // accent-colored dot on top - both above the icon shapes' z range
+        // (0.42-0.43) so they aren't hidden by the depth test (see the
+        // z-ordering note above).
+        C2D_DrawEllipseSolid(box_x + ICON_SIZE - 9, box_y + ICON_SIZE - 9, 0.44f, 9, 9,
+            C2D_Color32(0x1a, 0x1a, 0x1a, 0xFF));
+        C2D_DrawEllipseSolid(box_x + ICON_SIZE - 8, box_y + ICON_SIZE - 8, 0.45f, 7, 7,
+            C2D_Color32(0xFF, 0xB3, 0x4D, 0xFF));
+    }
 }
 
 // Small rotating-dot spinner shown while a network request is in flight.
@@ -690,6 +880,17 @@ static int prompt_text(const char *hint, const char *initial, char *out, size_t 
     return 1;
 }
 
+// Parses, optimizes, and draws a single line of text - the same three calls
+// repeated at every text-drawing site in this file, collapsed to one for the
+// entity list row/header text (the code this diff touches).
+static void draw_text(C2D_Font font, C2D_TextBuf dynBuf, const char *str,
+                       float x, float y, float z, float scale, u32 color) {
+    C2D_Text text;
+    C2D_TextFontParse(&text, font, dynBuf, str);
+    C2D_TextOptimize(&text);
+    C2D_DrawText(&text, C2D_WithColor, x, y, z, scale, scale, color);
+}
+
 // Renders one static frame with up to two lines of text on the top screen -
 // used around the blocking sign-in network calls so the display shows
 // what's happening rather than a stale frame.
@@ -720,6 +921,67 @@ static void draw_status_frame(C2D_Font font, C2D_TextBuf dynBuf,
     C2D_SceneBegin(bottom);
 
     C3D_FrameEnd(0);
+}
+
+// Switches to the Settings screen, remembering the mask it was opened with
+// so settings_exit() can tell whether a refresh is actually needed.
+static void settings_enter(void) {
+    settings_mask_on_entry = app_cfg.enabled_domains;
+    settings_cursor = 0;
+    settings_status[0] = '\0';
+    app_mode = APP_MODE_SETTINGS;
+}
+
+// Back to the main list. Only kicks off a refresh if the enabled-domain set
+// actually changed while in here - toggling nothing back and forth
+// shouldn't cost a network round-trip. Skipped while a worker is already
+// in flight; the existing list just stays as-is until the next manual/auto
+// refresh, same as any other change made mid-request.
+static void settings_exit(void) {
+    app_mode = APP_MODE_MAIN;
+    if (app_cfg.enabled_domains != settings_mask_on_entry && !network_busy) {
+        start_worker(OP_REFRESH, NULL, 0, 0.0f, NULL, 0);
+    }
+}
+
+// Flips one domain's bit, applies it to ha_client immediately, and persists
+// it - each toggle is a rare, deliberate action, so saving on every flip
+// (rather than batching until settings_exit()) keeps the choice safe even
+// if the app is closed from the HOME menu while still on this screen.
+// Refuses to turn off the last enabled domain: an empty entity list with no
+// on-screen explanation is more confusing than a blocked toggle.
+static void settings_toggle_domain(int idx) {
+    unsigned int candidate = app_cfg.enabled_domains ^ (1u << idx);
+    if (candidate == 0) {
+        snprintf(settings_status, sizeof(settings_status), "At least one type must stay on");
+        return;
+    }
+
+    app_cfg.enabled_domains = candidate;
+    ha_client_set_enabled_domains(candidate);
+    settings_status[0] = '\0';
+    if (app_config_save(&app_cfg) != 0) {
+        LOG("WARNING: settings save failed");
+    }
+}
+
+// Switches to the Color screen for one entity (B on a light that
+// supports_color or supports_color_temp - see the KEY_B handler in main()).
+static void color_enter(const ha_entity_t *e) {
+    strncpy(color_target_entity_id, e->entity_id, sizeof(color_target_entity_id) - 1);
+    color_target_entity_id[sizeof(color_target_entity_id) - 1] = '\0';
+    strncpy(color_target_name, e->friendly_name, sizeof(color_target_name) - 1);
+    color_target_name[sizeof(color_target_name) - 1] = '\0';
+    color_target_supports_color = e->supports_color;
+    color_target_supports_color_temp = e->supports_color_temp;
+    app_mode = APP_MODE_COLOR;
+}
+
+// Back to the main list. No refresh needed here - tapping a preset already
+// starts a set-color-then-single-entity-refresh worker (see OP_SET_COLOR/
+// OP_SET_COLOR_TEMP), same as brightness.
+static void color_exit(void) {
+    app_mode = APP_MODE_MAIN;
 }
 
 // Resets the form and switches to it. allow_cancel is 0 at boot when there's
@@ -772,7 +1034,7 @@ static void signin_finish_exchange(const char *auth_code, C2D_Font font, C2D_Tex
     app_mode = APP_MODE_MAIN;
     snprintf(status_msg, sizeof(status_msg), "Signed in");
     LOG("sign-in complete for %s", signin_url);
-    start_worker(OP_REFRESH, NULL, 0, 0.0f);
+    start_worker(OP_REFRESH, NULL, 0, 0.0f, NULL, 0);
 }
 
 // Runs the (blocking) login-flow network calls for the current form state:
@@ -944,6 +1206,167 @@ static void draw_signin_screen(C2D_Font font, C2D_TextBuf dynBuf,
     }
 }
 
+#define SETTINGS_ROW_H 26.0f
+#define SETTINGS_TOP_Y 22.0f
+
+static void draw_settings_screen(C2D_Font font, C2D_TextBuf dynBuf,
+                                 C3D_RenderTarget *top, C3D_RenderTarget *bottom) {
+    C2D_TargetClear(top, C2D_Color32(0x18, 0x1c, 0x28, 0xFF));
+    C2D_SceneBegin(top);
+
+    C2D_Text title;
+    C2D_TextFontParse(&title, font, dynBuf, "Settings");
+    C2D_TextOptimize(&title);
+    C2D_DrawText(&title, C2D_WithColor, 12.0f, 8.0f, 0.5f, 0.6f, 0.6f, C2D_Color32(0xFF, 0xFF, 0xFF, 0xFF));
+
+    C2D_Text sub;
+    C2D_TextFontParse(&sub, font, dynBuf, "Entity types to pull from Home Assistant");
+    C2D_TextOptimize(&sub);
+    C2D_DrawText(&sub, C2D_WithColor, 12.0f, 36.0f, 0.5f, 0.5f, 0.5f, C2D_Color32(0x9f, 0xd8, 0xff, 0xFF));
+
+    if (settings_status[0]) {
+        C2D_Text warn;
+        C2D_TextFontParse(&warn, font, dynBuf, settings_status);
+        C2D_TextOptimize(&warn);
+        C2D_DrawText(&warn, C2D_WithColor, 12.0f, 60.0f, 0.5f, 0.42f, 0.42f, C2D_Color32(0xFF, 0x99, 0x55, 0xFF));
+    }
+
+    C2D_Text instr;
+    C2D_TextFontParse(&instr, font, dynBuf, "Touch/A: toggle   Up/Down: move   B/START: back");
+    C2D_TextOptimize(&instr);
+    C2D_DrawText(&instr, C2D_WithColor, 12.0f, 196.0f, 0.5f, 0.4f, 0.4f, C2D_Color32(0x88, 0x88, 0x88, 0xFF));
+
+    C2D_TargetClear(bottom, C2D_Color32(0x10, 0x12, 0x18, 0xFF));
+    C2D_SceneBegin(bottom);
+
+    C2D_DrawRectSolid(0.0f, 0.0f, 0.4f, 320.0f, SETTINGS_TOP_Y, C2D_Color32(0x28, 0x2c, 0x38, 0xFF));
+    C2D_Text header;
+    C2D_TextFontParse(&header, font, dynBuf, "Entity Types");
+    C2D_TextOptimize(&header);
+    C2D_DrawText(&header, C2D_WithColor, 6.0f, 4.0f, 0.5f, 0.4f, 0.4f, C2D_Color32(0xCC, 0xCC, 0xCC, 0xFF));
+
+    for (int i = 0; i < HA_NUM_DOMAINS; i++) {
+        float y = SETTINGS_TOP_Y + (float)i * SETTINGS_ROW_H;
+        int selected = (i == settings_cursor);
+        int on = (app_cfg.enabled_domains & (1u << i)) != 0;
+
+        u32 rowColor = selected ? C2D_Color32(0x2f, 0x6f, 0xdf, 0xFF)
+            : (i % 2 == 0) ? C2D_Color32(0x20, 0x24, 0x30, 0xFF) : C2D_Color32(0x18, 0x1a, 0x24, 0xFF);
+        C2D_DrawRectSolid(0.0f, y, 0.4f, 320.0f, SETTINGS_ROW_H, rowColor);
+        if (selected) {
+            C2D_DrawRectSolid(0.0f, y, 0.41f, 4.0f, SETTINGS_ROW_H, C2D_Color32(0xFF, 0xFF, 0xFF, 0xFF));
+        }
+
+        C2D_Text label;
+        C2D_TextFontParse(&label, font, dynBuf, HA_DOMAIN_LABELS[i]);
+        C2D_TextOptimize(&label);
+        C2D_DrawText(&label, C2D_WithColor, 14.0f, y + 6.0f, 0.5f, 0.44f, 0.44f, C2D_Color32(0xFF, 0xFF, 0xFF, 0xFF));
+
+        const char *state = on ? "ON" : "OFF";
+        u32 stateColor = on ? C2D_Color32(0x4c, 0xd9, 0x64, 0xFF) : C2D_Color32(0x88, 0x88, 0x88, 0xFF);
+        C2D_Text stateText;
+        C2D_TextFontParse(&stateText, font, dynBuf, state);
+        C2D_TextOptimize(&stateText);
+        C2D_DrawText(&stateText, C2D_WithColor, 278.0f, y + 6.0f, 0.5f, 0.44f, 0.44f, stateColor);
+    }
+}
+
+// --- Color screen (rgb_color / color_temp_kelvin presets) ------------------
+// A fixed preset palette rather than a full color wheel/slider: precise
+// hue/saturation dragging on a 320x240 touch screen is fiddly, and presets
+// cover the common case (set a mood color, or warm/neutral/cool white) in
+// one tap.
+#define COLOR_TOP_Y 22.0f
+#define COLOR_GRID_COLS 3
+#define COLOR_CELL_W (320.0f / COLOR_GRID_COLS)
+#define COLOR_CELL_H 50.0f
+#define COLOR_TEMP_CELL_H 44.0f
+
+typedef struct {
+    int r, g, b;
+    const char *label;
+} color_preset_t;
+
+static const color_preset_t COLOR_PRESETS[] = {
+    {255, 0, 0, "Red"}, {255, 140, 0, "Orange"}, {255, 215, 0, "Yellow"},
+    {0, 200, 0, "Green"}, {0, 200, 200, "Cyan"}, {30, 80, 255, "Blue"},
+    {160, 60, 220, "Purple"}, {255, 20, 147, "Pink"}, {255, 255, 255, "White"},
+};
+#define NUM_COLOR_PRESETS (sizeof(COLOR_PRESETS) / sizeof(COLOR_PRESETS[0]))
+// Rows the color grid actually occupies - shared by draw_color_screen()
+// (where the temp row starts) and the APP_MODE_COLOR touch handler (which
+// row a tap in the color grid landed in), so the two agree on layout.
+#define COLOR_GRID_ROWS ((int)((NUM_COLOR_PRESETS + COLOR_GRID_COLS - 1) / COLOR_GRID_COLS))
+
+typedef struct {
+    int kelvin;
+    int r, g, b; // approximate swatch color for the temperature, display only
+    const char *label;
+} temp_preset_t;
+
+static const temp_preset_t TEMP_PRESETS[] = {
+    {2700, 255, 179, 102, "Warm"},
+    {4000, 255, 244, 229, "Neutral"},
+    {6500, 204, 229, 255, "Cool"},
+};
+#define NUM_TEMP_PRESETS (sizeof(TEMP_PRESETS) / sizeof(TEMP_PRESETS[0]))
+
+// Top-left of grid cell `index` in a `cols`-wide grid whose rows start at
+// base_y, each `cell_h` tall - shared by draw_color_screen() (drawing) and
+// the APP_MODE_COLOR touch handler (hit-testing) so the two can't drift
+// apart. Full-cell width/height (COLOR_CELL_W, cell_h), not the inset
+// swatch drawn inside it, is the tappable area - a bigger target than the
+// swatch itself is easier to hit on a 3DS touch screen.
+static void color_cell_origin(int index, int cols, float base_y, float cell_h, float *out_x, float *out_y) {
+    *out_x = (float)(index % cols) * COLOR_CELL_W;
+    *out_y = base_y + (float)(index / cols) * cell_h;
+}
+
+static void draw_color_screen(C2D_Font font, C2D_TextBuf dynBuf,
+                               C3D_RenderTarget *top, C3D_RenderTarget *bottom) {
+    C2D_TargetClear(top, C2D_Color32(0x18, 0x1c, 0x28, 0xFF));
+    C2D_SceneBegin(top);
+
+    C2D_Text title;
+    char title_str[64];
+    snprintf(title_str, sizeof(title_str), "Color: %.40s", color_target_name);
+    C2D_TextFontParse(&title, font, dynBuf, title_str);
+    C2D_TextOptimize(&title);
+    C2D_DrawText(&title, C2D_WithColor, 12.0f, 8.0f, 0.5f, 0.55f, 0.55f, C2D_Color32(0xFF, 0xFF, 0xFF, 0xFF));
+
+    C2D_Text instr;
+    C2D_TextFontParse(&instr, font, dynBuf, "Touch a swatch to apply   B: back");
+    C2D_TextOptimize(&instr);
+    C2D_DrawText(&instr, C2D_WithColor, 12.0f, 36.0f, 0.5f, 0.42f, 0.42f, C2D_Color32(0x9f, 0xd8, 0xff, 0xFF));
+
+    C2D_TargetClear(bottom, C2D_Color32(0x10, 0x12, 0x18, 0xFF));
+    C2D_SceneBegin(bottom);
+
+    C2D_DrawRectSolid(0.0f, 0.0f, 0.4f, 320.0f, COLOR_TOP_Y, C2D_Color32(0x28, 0x2c, 0x38, 0xFF));
+    draw_text(font, dynBuf, "Colors", 6.0f, 4.0f, 0.5f, 0.4f, C2D_Color32(0xCC, 0xCC, 0xCC, 0xFF));
+
+    float y = COLOR_TOP_Y;
+    if (color_target_supports_color) {
+        for (size_t i = 0; i < NUM_COLOR_PRESETS; i++) {
+            float cx, cy;
+            color_cell_origin((int)i, COLOR_GRID_COLS, COLOR_TOP_Y, COLOR_CELL_H, &cx, &cy);
+            C2D_DrawRectSolid(cx + 4.0f, cy + 4.0f, 0.42f, COLOR_CELL_W - 8.0f, COLOR_CELL_H - 8.0f,
+                C2D_Color32((u8)COLOR_PRESETS[i].r, (u8)COLOR_PRESETS[i].g, (u8)COLOR_PRESETS[i].b, 0xFF));
+        }
+        y = COLOR_TOP_Y + (float)COLOR_GRID_ROWS * COLOR_CELL_H;
+    }
+    if (color_target_supports_color_temp) {
+        for (size_t i = 0; i < NUM_TEMP_PRESETS; i++) {
+            float cx, cy;
+            color_cell_origin((int)i, (int)NUM_TEMP_PRESETS, y, COLOR_TEMP_CELL_H, &cx, &cy);
+            C2D_DrawRectSolid(cx + 4.0f, cy + 4.0f, 0.42f, COLOR_CELL_W - 8.0f, COLOR_TEMP_CELL_H - 12.0f,
+                C2D_Color32((u8)TEMP_PRESETS[i].r, (u8)TEMP_PRESETS[i].g, (u8)TEMP_PRESETS[i].b, 0xFF));
+            draw_text(font, dynBuf, TEMP_PRESETS[i].label, cx + 6.0f, cy + COLOR_TEMP_CELL_H - 14.0f,
+                0.43f, 0.34f, C2D_Color32(0xFF, 0xFF, 0xFF, 0xFF));
+        }
+    }
+}
+
 // Opens the system software keyboard to edit filter_text. Blocking (takes
 // over the screen until the user confirms/cancels) - fine to call directly
 // from the main thread's input handling, same as HOME menu suspension.
@@ -1038,8 +1461,8 @@ int main(int argc, char **argv) {
     C2D_TextOptimize(&titleText);
     LOG("title text optimized");
     C2D_TextFontParse(&instructionsText, font, staticBuf,
-        "Touch/A: toggle   Up/Down: move   Y: refresh   X: group by room\n"
-        "Left/Right: dim/temp   L/R: min/max/+-2\xC2\xB0   SELECT: sign in");
+        "Touch/A: toggle   Up/Down: move   Y: refresh   X: room   SELECT: sign in\n"
+        "Left/Right: dim/temp   L/R: min/max/+-2\xC2\xB0   B: color   START: settings");
     C2D_TextOptimize(&instructionsText);
     LOG("instructions text parsed+optimized");
 
@@ -1066,10 +1489,11 @@ int main(int argc, char **argv) {
     } else {
         snprintf(status_msg, sizeof(status_msg), "No network (soc init failed)");
     }
+    ha_client_set_enabled_domains(app_cfg.enabled_domains);
 
     if (signed_in) {
         LOG("kicking off initial background refresh...");
-        start_worker(OP_REFRESH, NULL, 0, 0.0f);
+        start_worker(OP_REFRESH, NULL, 0, 0.0f, NULL, 0);
     }
 
     int first_frame = 1;
@@ -1100,8 +1524,11 @@ int main(int argc, char **argv) {
                 // own Cancel button, so opening it is always safe.
                 signin_enter(1);
             }
+            if (kDown & KEY_START) {
+                settings_enter();
+            }
             if (kDown & KEY_Y) {
-                start_worker(OP_REFRESH, NULL, 0, 0.0f);
+                start_worker(OP_REFRESH, NULL, 0, 0.0f, NULL, 0);
             }
             if (kDown & KEY_X) {
                 char preserved_id[HA_MAX_ENTITY_ID];
@@ -1112,18 +1539,22 @@ int main(int argc, char **argv) {
                 snprintf(status_msg, sizeof(status_msg), group_by_room ? "Grouped by room" : "Sorted by name");
             }
             if (kDown & KEY_DUP) {
-                selected_index--;
-                clamp_selection();
+                move_selection(-1);
             }
             if (kDown & KEY_DDOWN) {
-                selected_index++;
-                clamp_selection();
+                move_selection(1);
             }
-            int has_selection = (selected_index >= 0 && selected_index < visible_count);
+            int has_selection = (selected_index >= 0 && selected_index < visible_count &&
+                visible_indices[selected_index] != ROW_IS_HEADER);
             int selected_entity_idx = has_selection ? visible_indices[selected_index] : -1;
 
             if ((kDown & KEY_A) && has_selection) {
-                start_worker(OP_TOGGLE, entities[selected_entity_idx].entity_id, 0, 0.0f);
+                start_worker(OP_TOGGLE, entities[selected_entity_idx].entity_id, 0, 0.0f,
+                    entities[selected_entity_idx].state, entities[selected_entity_idx].is_group);
+            }
+            if ((kDown & KEY_B) && has_selection &&
+                (entities[selected_entity_idx].supports_color || entities[selected_entity_idx].supports_color_temp)) {
+                color_enter(&entities[selected_entity_idx]);
             }
             if ((kDown & (KEY_DLEFT | KEY_DRIGHT)) && has_selection && entities[selected_entity_idx].supports_brightness) {
                 int delta = (kDown & KEY_DRIGHT) ? 10 : -10;
@@ -1134,34 +1565,81 @@ int main(int argc, char **argv) {
                 if (new_pct > 100) {
                     new_pct = 100;
                 }
-                start_worker(OP_SET_BRIGHTNESS, entities[selected_entity_idx].entity_id, new_pct, 0.0f);
+                start_worker(OP_SET_BRIGHTNESS, entities[selected_entity_idx].entity_id, new_pct, 0.0f, NULL, 0);
             }
             if ((kDown & (KEY_L | KEY_R)) && has_selection && entities[selected_entity_idx].supports_brightness) {
                 // 1% rather than 0 for "min" - HA treats brightness_pct 0 as
                 // ambiguous with turning the light off on some integrations.
                 int target_pct = (kDown & KEY_R) ? 100 : 1;
-                start_worker(OP_SET_BRIGHTNESS, entities[selected_entity_idx].entity_id, target_pct, 0.0f);
+                start_worker(OP_SET_BRIGHTNESS, entities[selected_entity_idx].entity_id, target_pct, 0.0f, NULL, 0);
             }
             if ((kDown & (KEY_DLEFT | KEY_DRIGHT)) && has_selection && entities[selected_entity_idx].is_climate) {
                 float delta = (kDown & KEY_DRIGHT) ? 0.5f : -0.5f;
                 start_worker(OP_SET_TEMPERATURE, entities[selected_entity_idx].entity_id, 0,
-                    entities[selected_entity_idx].target_temp + delta);
+                    entities[selected_entity_idx].target_temp + delta, NULL, 0);
             }
             if ((kDown & (KEY_L | KEY_R)) && has_selection && entities[selected_entity_idx].is_climate) {
                 float delta = (kDown & KEY_R) ? 2.0f : -2.0f;
                 start_worker(OP_SET_TEMPERATURE, entities[selected_entity_idx].entity_id, 0,
-                    entities[selected_entity_idx].target_temp + delta);
+                    entities[selected_entity_idx].target_temp + delta, NULL, 0);
             }
 
             if (touch_tapped) {
-                if (touch.py < LIST_TOP_Y) {
+                float top_y = list_top_y();
+                if (touch.py < FILTER_BOX_HEIGHT) {
                     open_filter_keyboard();
-                } else {
-                    int row = (touch.py - LIST_TOP_Y) / ROW_HEIGHT;
+                } else if (touch.py >= top_y) {
+                    int row = (int)((touch.py - top_y) / ROW_HEIGHT);
                     int pos = scroll_offset + row;
-                    if (row < VISIBLE_ROWS && pos >= 0 && pos < visible_count) {
+                    if (row < VISIBLE_ROWS && pos >= 0 && pos < visible_count &&
+                        visible_indices[pos] != ROW_IS_HEADER) {
                         selected_index = pos;
-                        start_worker(OP_TOGGLE, entities[visible_indices[pos]].entity_id, 0, 0.0f);
+                        start_worker(OP_TOGGLE, entities[visible_indices[pos]].entity_id, 0, 0.0f,
+                            entities[visible_indices[pos]].state, entities[visible_indices[pos]].is_group);
+                    }
+                }
+                // else: tap landed on the sticky room bar - no-op, same as
+                // tapping a header row.
+            }
+        } else if (app_mode == APP_MODE_SETTINGS) {
+            if (kDown & KEY_DUP) {
+                settings_cursor = (settings_cursor - 1 + HA_NUM_DOMAINS) % HA_NUM_DOMAINS;
+            }
+            if (kDown & KEY_DDOWN) {
+                settings_cursor = (settings_cursor + 1) % HA_NUM_DOMAINS;
+            }
+            if (kDown & KEY_A) {
+                settings_toggle_domain(settings_cursor);
+            }
+            if (kDown & (KEY_B | KEY_START)) {
+                settings_exit();
+            }
+            if (touch_tapped && touch.py >= SETTINGS_TOP_Y) {
+                int row = (int)((touch.py - SETTINGS_TOP_Y) / SETTINGS_ROW_H);
+                if (row >= 0 && row < HA_NUM_DOMAINS) {
+                    settings_cursor = row;
+                    settings_toggle_domain(row);
+                }
+            }
+        } else if (app_mode == APP_MODE_COLOR) {
+            if (kDown & (KEY_B | KEY_START)) {
+                color_exit();
+            }
+            if (touch_tapped && touch.py >= COLOR_TOP_Y) {
+                float temp_top_y = COLOR_TOP_Y + (color_target_supports_color ? (float)COLOR_GRID_ROWS * COLOR_CELL_H : 0.0f);
+                if (color_target_supports_color && touch.py < temp_top_y) {
+                    int col = (int)(touch.px / COLOR_CELL_W);
+                    int row = (int)((touch.py - COLOR_TOP_Y) / COLOR_CELL_H);
+                    size_t idx = (size_t)(row * COLOR_GRID_COLS + col);
+                    if (idx < NUM_COLOR_PRESETS) {
+                        int packed = (COLOR_PRESETS[idx].r << 16) | (COLOR_PRESETS[idx].g << 8) | COLOR_PRESETS[idx].b;
+                        start_worker(OP_SET_COLOR, color_target_entity_id, packed, 0.0f, NULL, 0);
+                    }
+                } else if (color_target_supports_color_temp && touch.py >= temp_top_y &&
+                           touch.py < temp_top_y + COLOR_TEMP_CELL_H) {
+                    size_t idx = (size_t)(touch.px / COLOR_CELL_W);
+                    if (idx < NUM_TEMP_PRESETS) {
+                        start_worker(OP_SET_COLOR_TEMP, color_target_entity_id, TEMP_PRESETS[idx].kelvin, 0.0f, NULL, 0);
                     }
                 }
             }
@@ -1201,6 +1679,10 @@ int main(int argc, char **argv) {
 
         if (app_mode == APP_MODE_SIGNIN) {
             draw_signin_screen(font, dynBuf, top, bottom);
+        } else if (app_mode == APP_MODE_SETTINGS) {
+            draw_settings_screen(font, dynBuf, top, bottom);
+        } else if (app_mode == APP_MODE_COLOR) {
+            draw_color_screen(font, dynBuf, top, bottom);
         } else {
         C2D_TargetClear(top, C2D_Color32(0x18, 0x1c, 0x28, 0xFF));
         C2D_SceneBegin(top);
@@ -1233,24 +1715,60 @@ int main(int argc, char **argv) {
         C2D_DrawRectSolid(0.0f, 0.0f, 0.4f, 320.0f, (float)FILTER_BOX_HEIGHT, C2D_Color32(0x28, 0x2c, 0x38, 0xFF));
         char filter_display[48];
         if (filter_text[0]) {
-            snprintf(filter_display, sizeof(filter_display), "Filter: %s  (%d/%d)", filter_text, visible_count, entity_count);
+            snprintf(filter_display, sizeof(filter_display), "Filter: %s  (%d/%d)", filter_text, visible_entity_count, entity_count);
         } else {
             snprintf(filter_display, sizeof(filter_display), "Tap to filter list...");
         }
-        C2D_Text filterTextObj;
-        C2D_TextFontParse(&filterTextObj, font, dynBuf, filter_display);
-        C2D_TextOptimize(&filterTextObj);
-        C2D_DrawText(&filterTextObj, C2D_WithColor, 6.0f, 4.0f, 0.5f, 0.4f, 0.4f,
+        draw_text(font, dynBuf, filter_display, 6.0f, 4.0f, 0.5f, 0.4f,
             C2D_Color32(0xCC, 0xCC, 0xCC, 0xFF));
 
+        // Persistent "current room" bar: only drawn when scrolled mid-group
+        // (see sticky_room_bar_active()) so a long room's name stays on
+        // screen even once its own header row has scrolled out of view.
+        if (sticky_room_bar_active()) {
+            const ha_entity_t *top_entity = &entities[visible_indices[scroll_offset]];
+            C2D_DrawRectSolid(0.0f, (float)FILTER_BOX_HEIGHT, 0.4f, 320.0f, STICKY_ROOM_BAR_HEIGHT,
+                C2D_Color32(0x2a, 0x22, 0x0e, 0xFF));
+            draw_text(font, dynBuf, entity_area_label(top_entity), 8.0f, (float)FILTER_BOX_HEIGHT + 2.0f,
+                0.5f, 0.36f, C2D_Color32(0xFF, 0xB3, 0x4D, 0xFF));
+        }
+
+        float list_y = list_top_y();
         for (int i = 0; i < VISIBLE_ROWS; i++) {
             int pos = scroll_offset + i;
             if (pos >= visible_count) {
                 break;
             }
             int idx = visible_indices[pos];
+            float y = list_y + i * ROW_HEIGHT;
 
-            float y = LIST_TOP_Y + i * ROW_HEIGHT;
+            if (idx == ROW_IS_HEADER) {
+                // Section header: a distinct full-width band naming the
+                // room the row(s) below belong to, so grouping reads as
+                // real sections rather than a same-list resort. Its text
+                // comes from the entity right after it, since a header is
+                // only ever emitted immediately before the first entity of
+                // a new area (see rebuild_visible_list). Accent goes on the
+                // left edge, not a line flush along the top - a top line on
+                // the very first header sits right on the seam with the
+                // filter box above it and reads as the header overlapping/
+                // peeking out from underneath it.
+                C2D_DrawRectSolid(0.0f, y, 0.4f, 320.0f, (float)ROW_HEIGHT, C2D_Color32(0x3a, 0x2e, 0x12, 0xFF));
+                C2D_DrawRectSolid(0.0f, y, 0.41f, 4.0f, (float)ROW_HEIGHT, C2D_Color32(0xFF, 0xB3, 0x4D, 0xFF));
+
+                const char *area = AREA_UNASSIGNED_LABEL;
+                if (pos + 1 < visible_count && visible_indices[pos + 1] != ROW_IS_HEADER) {
+                    const ha_entity_t *next = &entities[visible_indices[pos + 1]];
+                    area = entity_area_label(next);
+                }
+                char header_display[40];
+                snprintf(header_display, sizeof(header_display), "%.36s", area);
+
+                draw_text(font, dynBuf, header_display, 8.0f, y + 6.0f, 0.5f, 0.44f,
+                    C2D_Color32(0xFF, 0xB3, 0x4D, 0xFF));
+                continue;
+            }
+
             int is_selected = (pos == selected_index);
             u32 rowColor;
             if (is_selected) {
@@ -1265,20 +1783,12 @@ int main(int argc, char **argv) {
                 C2D_DrawRectSolid(0.0f, y, 0.41f, 4.0f, (float)ROW_HEIGHT, C2D_Color32(0xFF, 0xFF, 0xFF, 0xFF));
             }
 
-            draw_domain_icon(entities[idx].entity_id, 4.0f, y + 3.0f);
+            draw_domain_icon(entities[idx].entity_id, 4.0f, y + 3.0f, entities[idx].is_group);
 
             char display_name[48];
-            if (group_by_room) {
-                const char *area = entities[idx].area_name[0] ? entities[idx].area_name : "Other";
-                snprintf(display_name, sizeof(display_name), "%.14s: %.24s", area, entities[idx].friendly_name);
-            } else {
-                snprintf(display_name, sizeof(display_name), "%.32s", entities[idx].friendly_name);
-            }
+            snprintf(display_name, sizeof(display_name), "%.32s", entities[idx].friendly_name);
 
-            C2D_Text nameText, stateText;
-            C2D_TextFontParse(&nameText, font, dynBuf, display_name);
-            C2D_TextOptimize(&nameText);
-            C2D_DrawText(&nameText, C2D_WithColor, 28.0f, y + 4.0f, 0.5f, 0.42f, 0.42f,
+            draw_text(font, dynBuf, display_name, 28.0f, y + 4.0f, 0.5f, 0.42f,
                 C2D_Color32(0xFF, 0xFF, 0xFF, 0xFF));
 
             int is_on = (strcmp(entities[idx].state, "on") == 0);
@@ -1305,9 +1815,7 @@ int main(int argc, char **argv) {
                 snprintf(state_display, sizeof(state_display), "%s", entities[idx].state);
             }
 
-            C2D_TextFontParse(&stateText, font, dynBuf, state_display);
-            C2D_TextOptimize(&stateText);
-            C2D_DrawText(&stateText, C2D_WithColor, 235.0f, y + 4.0f, 0.5f, 0.42f, 0.42f, stateColor);
+            draw_text(font, dynBuf, state_display, 235.0f, y + 4.0f, 0.5f, 0.42f, stateColor);
         }
         } // app_mode == APP_MODE_MAIN
 
