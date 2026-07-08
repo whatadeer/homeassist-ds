@@ -103,7 +103,9 @@ expired-looking certs from a wrong clock are a common false alarm.
   the binary via the Makefile's `DATA`/`bin2s` pipeline and used for HTTPS
   cert verification (`source/ha_client.c`, `CURLOPT_CAINFO_BLOB`) — the 3DS
   has no system trust store libcurl can fall back on. It's just a text file
-  of root certs; re-download it periodically to pick up CA rotations.
+  of root certs; `.github/workflows/update-cacert.yml` re-downloads it
+  monthly and opens a PR if it changed, so CA rotations don't need to be
+  tracked by hand.
 - `resources/app.rsf` is the makerom packaging spec (title/permissions).
   It's adapted from a known-working homebrew CIA project
   ([FBI](https://github.com/Steveice10/FBI)'s build config) — if `makerom`

@@ -1,0 +1,62 @@
+name: Update CA cert bundle
+
+# Home Assistant instances are typically reached over TLS with a real
+# CA-signed cert, but the 3DS has no system trust store for libcurl to fall
+# back on (see source/ha_client.c, CURLOPT_CAINFO_BLOB) - so data/cacert.bin
+# (curl's Mozilla CA bundle, as distributed at curl.se/ca/cacert.pem) is
+# committed to the repo and embedded at build time. This keeps it current:
+# monthly, re-download the bundle and open a PR if it changed, so root-CA
+# rotations get picked up without anyone remembering to do it by hand.
+on:
+  schedule:
+    - cron: '0 6 1 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-cacert:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch latest CA bundle
+        run: curl -fsSL -o /tmp/cacert.pem https://curl.se/ca/cacert.pem
+
+      - name: Compare against committed bundle
+        id: diff
+        run: |
+          if cmp -s /tmp/cacert.pem data/cacert.bin; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open update PR
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BRANCH="chore/update-cacert"
+
+          # A previous run's PR is still open - branches are deleted on
+          # merge, so a branch that still exists upstream means an update PR
+          # is already pending. Don't pile up duplicates in front of it.
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            echo "Branch $BRANCH already exists upstream; an update PR is already pending. Skipping."
+            exit 0
+          fi
+
+          cp /tmp/cacert.pem data/cacert.bin
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add data/cacert.bin
+          git commit -m "Update data/cacert.bin from curl.se's CA bundle"
+          git push origin "$BRANCH"
+          gh pr create --title "Update CA cert bundle" \
+            --body "Automated refresh of \`data/cacert.bin\` from https://curl.se/ca/cacert.pem (curl's Mozilla CA bundle), used for HTTPS cert verification in \`source/ha_client.c\` since the 3DS has no system trust store." \
+            --head "$BRANCH" \
+            --base main
