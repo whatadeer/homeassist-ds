@@ -45,7 +45,32 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          sudo apt-get update -qq && sudo apt-get install -y qrencode
+
+          # Predictable release-asset URL pattern - the assets below get
+          # uploaded to exactly this path by the gh release create call
+          # further down, so it's safe to reference before they exist.
+          CIA_URL="https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/ha3ds.cia"
+          QR_URL="https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/ha3ds-qr.png"
+
+          # FBI's Remote Install can scan a QR code (camera icon in its
+          # network-install menu) instead of typing the URL in by hand.
+          qrencode -o ha3ds-qr.png -s 8 -m 2 "$CIA_URL"
+
+          cat > release-notes.md <<'EOF'
+          ## Install
+
+          On your 3DS, open FBI, go to Remote Install, and either scan the
+          QR code below with the camera icon or enter the URL manually:
+
+          CIA_URL_PLACEHOLDER
+
+          ![QR code](QR_URL_PLACEHOLDER)
+          EOF
+          sed -i "s|CIA_URL_PLACEHOLDER|$CIA_URL|" release-notes.md
+          sed -i "s|QR_URL_PLACEHOLDER|$QR_URL|" release-notes.md
+
           gh release create "${{ github.ref_name }}" \
-            ha3ds.cia ha3ds.3dsx \
+            ha3ds.cia ha3ds.3dsx ha3ds-qr.png \
             --title "${{ github.ref_name }}" \
-            --generate-notes
+            --notes-file release-notes.md
