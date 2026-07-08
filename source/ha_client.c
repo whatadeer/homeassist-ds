@@ -68,23 +68,28 @@ static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
     return realsize;
 }
 
-static int is_supported_domain(const char *entity_id) {
+// Index of the entry in `domains` (an array of `n` domain-name strings)
+// matching entity_id's domain prefix (the part before '.'), or -1 if none
+// match. Shared by is_supported_domain() and ha_toggle_entity()'s
+// direct-dispatch lookup so "compare a domain name against entity_id's
+// prefix" has one implementation instead of two near-identical loops.
+static int find_domain_index(const char *entity_id, const char *const domains[], size_t n) {
     const char *dot = strchr(entity_id, '.');
     if (!dot) {
-        return 0;
+        return -1;
     }
     size_t domain_len = (size_t)(dot - entity_id);
-
-    for (size_t i = 0; i < HA_NUM_DOMAINS; i++) {
-        if (!(g_enabled_domains & (1u << i))) {
-            continue;
-        }
-        if (strlen(HA_DOMAINS[i]) == domain_len &&
-            strncmp(HA_DOMAINS[i], entity_id, domain_len) == 0) {
-            return 1;
+    for (size_t i = 0; i < n; i++) {
+        if (strlen(domains[i]) == domain_len && strncmp(domains[i], entity_id, domain_len) == 0) {
+            return (int)i;
         }
     }
-    return 0;
+    return -1;
+}
+
+static int is_supported_domain(const char *entity_id) {
+    int idx = find_domain_index(entity_id, HA_DOMAINS, HA_NUM_DOMAINS);
+    return idx >= 0 && (g_enabled_domains & (1u << idx)) ? 1 : 0;
 }
 
 // Fills out->* from a single /api/states-style JSON object (works whether
@@ -613,15 +618,11 @@ int ha_toggle_entity(const char *entity_id, const char *current_state, int is_gr
     char body[HA_MAX_ENTITY_ID + 32];
     snprintf(body, sizeof(body), "{\"entity_id\":\"%s\"}", entity_id);
 
-    const char *dot = strchr(entity_id, '.');
-    if (dot && current_state && current_state[0] && !is_group) {
-        size_t domain_len = (size_t)(dot - entity_id);
-        for (size_t i = 0; i < NUM_DIRECT_TOGGLE_DOMAINS; i++) {
-            if (strlen(DIRECT_TOGGLE_DOMAINS[i]) == domain_len &&
-                strncmp(DIRECT_TOGGLE_DOMAINS[i], entity_id, domain_len) == 0) {
-                const char *service = strcmp(current_state, "on") == 0 ? "turn_off" : "turn_on";
-                return ha_post_service(DIRECT_TOGGLE_DOMAINS[i], service, body);
-            }
+    if (current_state && current_state[0] && !is_group) {
+        int idx = find_domain_index(entity_id, DIRECT_TOGGLE_DOMAINS, NUM_DIRECT_TOGGLE_DOMAINS);
+        if (idx >= 0) {
+            const char *service = strcmp(current_state, "on") == 0 ? "turn_off" : "turn_on";
+            return ha_post_service(DIRECT_TOGGLE_DOMAINS[idx], service, body);
         }
     }
     return ha_post_service("homeassistant", "toggle", body);

@@ -1214,36 +1214,22 @@ static void draw_settings_screen(C2D_Font font, C2D_TextBuf dynBuf,
     C2D_TargetClear(top, C2D_Color32(0x18, 0x1c, 0x28, 0xFF));
     C2D_SceneBegin(top);
 
-    C2D_Text title;
-    C2D_TextFontParse(&title, font, dynBuf, "Settings");
-    C2D_TextOptimize(&title);
-    C2D_DrawText(&title, C2D_WithColor, 12.0f, 8.0f, 0.5f, 0.6f, 0.6f, C2D_Color32(0xFF, 0xFF, 0xFF, 0xFF));
-
-    C2D_Text sub;
-    C2D_TextFontParse(&sub, font, dynBuf, "Entity types to pull from Home Assistant");
-    C2D_TextOptimize(&sub);
-    C2D_DrawText(&sub, C2D_WithColor, 12.0f, 36.0f, 0.5f, 0.5f, 0.5f, C2D_Color32(0x9f, 0xd8, 0xff, 0xFF));
+    draw_text(font, dynBuf, "Settings", 12.0f, 8.0f, 0.5f, 0.6f, C2D_Color32(0xFF, 0xFF, 0xFF, 0xFF));
+    draw_text(font, dynBuf, "Entity types to pull from Home Assistant", 12.0f, 36.0f, 0.5f, 0.5f,
+        C2D_Color32(0x9f, 0xd8, 0xff, 0xFF));
 
     if (settings_status[0]) {
-        C2D_Text warn;
-        C2D_TextFontParse(&warn, font, dynBuf, settings_status);
-        C2D_TextOptimize(&warn);
-        C2D_DrawText(&warn, C2D_WithColor, 12.0f, 60.0f, 0.5f, 0.42f, 0.42f, C2D_Color32(0xFF, 0x99, 0x55, 0xFF));
+        draw_text(font, dynBuf, settings_status, 12.0f, 60.0f, 0.5f, 0.42f, C2D_Color32(0xFF, 0x99, 0x55, 0xFF));
     }
 
-    C2D_Text instr;
-    C2D_TextFontParse(&instr, font, dynBuf, "Touch/A: toggle   Up/Down: move   B/START: back");
-    C2D_TextOptimize(&instr);
-    C2D_DrawText(&instr, C2D_WithColor, 12.0f, 196.0f, 0.5f, 0.4f, 0.4f, C2D_Color32(0x88, 0x88, 0x88, 0xFF));
+    draw_text(font, dynBuf, "Touch/A: toggle   Up/Down: move   B/START: back", 12.0f, 196.0f, 0.5f, 0.4f,
+        C2D_Color32(0x88, 0x88, 0x88, 0xFF));
 
     C2D_TargetClear(bottom, C2D_Color32(0x10, 0x12, 0x18, 0xFF));
     C2D_SceneBegin(bottom);
 
     C2D_DrawRectSolid(0.0f, 0.0f, 0.4f, 320.0f, SETTINGS_TOP_Y, C2D_Color32(0x28, 0x2c, 0x38, 0xFF));
-    C2D_Text header;
-    C2D_TextFontParse(&header, font, dynBuf, "Entity Types");
-    C2D_TextOptimize(&header);
-    C2D_DrawText(&header, C2D_WithColor, 6.0f, 4.0f, 0.5f, 0.4f, 0.4f, C2D_Color32(0xCC, 0xCC, 0xCC, 0xFF));
+    draw_text(font, dynBuf, "Entity Types", 6.0f, 4.0f, 0.5f, 0.4f, C2D_Color32(0xCC, 0xCC, 0xCC, 0xFF));
 
     for (int i = 0; i < HA_NUM_DOMAINS; i++) {
         float y = SETTINGS_TOP_Y + (float)i * SETTINGS_ROW_H;
@@ -1257,17 +1243,11 @@ static void draw_settings_screen(C2D_Font font, C2D_TextBuf dynBuf,
             C2D_DrawRectSolid(0.0f, y, 0.41f, 4.0f, SETTINGS_ROW_H, C2D_Color32(0xFF, 0xFF, 0xFF, 0xFF));
         }
 
-        C2D_Text label;
-        C2D_TextFontParse(&label, font, dynBuf, HA_DOMAIN_LABELS[i]);
-        C2D_TextOptimize(&label);
-        C2D_DrawText(&label, C2D_WithColor, 14.0f, y + 6.0f, 0.5f, 0.44f, 0.44f, C2D_Color32(0xFF, 0xFF, 0xFF, 0xFF));
+        draw_text(font, dynBuf, HA_DOMAIN_LABELS[i], 14.0f, y + 6.0f, 0.5f, 0.44f, C2D_Color32(0xFF, 0xFF, 0xFF, 0xFF));
 
         const char *state = on ? "ON" : "OFF";
         u32 stateColor = on ? C2D_Color32(0x4c, 0xd9, 0x64, 0xFF) : C2D_Color32(0x88, 0x88, 0x88, 0xFF);
-        C2D_Text stateText;
-        C2D_TextFontParse(&stateText, font, dynBuf, state);
-        C2D_TextOptimize(&stateText);
-        C2D_DrawText(&stateText, C2D_WithColor, 278.0f, y + 6.0f, 0.5f, 0.44f, 0.44f, stateColor);
+        draw_text(font, dynBuf, state, 278.0f, y + 6.0f, 0.5f, 0.44f, stateColor);
     }
 }
 
@@ -1327,17 +1307,11 @@ static void draw_color_screen(C2D_Font font, C2D_TextBuf dynBuf,
     C2D_TargetClear(top, C2D_Color32(0x18, 0x1c, 0x28, 0xFF));
     C2D_SceneBegin(top);
 
-    C2D_Text title;
     char title_str[64];
     snprintf(title_str, sizeof(title_str), "Color: %.40s", color_target_name);
-    C2D_TextFontParse(&title, font, dynBuf, title_str);
-    C2D_TextOptimize(&title);
-    C2D_DrawText(&title, C2D_WithColor, 12.0f, 8.0f, 0.5f, 0.55f, 0.55f, C2D_Color32(0xFF, 0xFF, 0xFF, 0xFF));
-
-    C2D_Text instr;
-    C2D_TextFontParse(&instr, font, dynBuf, "Touch a swatch to apply   B: back");
-    C2D_TextOptimize(&instr);
-    C2D_DrawText(&instr, C2D_WithColor, 12.0f, 36.0f, 0.5f, 0.42f, 0.42f, C2D_Color32(0x9f, 0xd8, 0xff, 0xFF));
+    draw_text(font, dynBuf, title_str, 12.0f, 8.0f, 0.5f, 0.55f, C2D_Color32(0xFF, 0xFF, 0xFF, 0xFF));
+    draw_text(font, dynBuf, "Touch a swatch to apply   B: back", 12.0f, 36.0f, 0.5f, 0.42f,
+        C2D_Color32(0x9f, 0xd8, 0xff, 0xFF));
 
     C2D_TargetClear(bottom, C2D_Color32(0x10, 0x12, 0x18, 0xFF));
     C2D_SceneBegin(bottom);
@@ -1524,7 +1498,12 @@ int main(int argc, char **argv) {
                 // own Cancel button, so opening it is always safe.
                 signin_enter(1);
             }
-            if (kDown & KEY_START) {
+            if ((kDown & KEY_START) && !network_busy) {
+                // Blocked while a worker is in flight: it reads g_enabled_domains
+                // (via is_supported_domain/ha_fetch_area_map) with no lock, and
+                // settings_toggle_domain() writes it straight from the main
+                // thread - same race the sign-in path above already guards
+                // against with this same check.
                 settings_enter();
             }
             if (kDown & KEY_Y) {
@@ -1628,12 +1607,19 @@ int main(int argc, char **argv) {
             if (touch_tapped && touch.py >= COLOR_TOP_Y) {
                 float temp_top_y = COLOR_TOP_Y + (color_target_supports_color ? (float)COLOR_GRID_ROWS * COLOR_CELL_H : 0.0f);
                 if (color_target_supports_color && touch.py < temp_top_y) {
+                    // Clamp col: a tap right at the panel's physical edge can
+                    // report touch.px == 320, which divides out to
+                    // COLOR_GRID_COLS (one past the last column) - without
+                    // this it would silently fall into the row below instead
+                    // of being rejected or landing on the rightmost swatch.
                     int col = (int)(touch.px / COLOR_CELL_W);
                     int row = (int)((touch.py - COLOR_TOP_Y) / COLOR_CELL_H);
-                    size_t idx = (size_t)(row * COLOR_GRID_COLS + col);
-                    if (idx < NUM_COLOR_PRESETS) {
-                        int packed = (COLOR_PRESETS[idx].r << 16) | (COLOR_PRESETS[idx].g << 8) | COLOR_PRESETS[idx].b;
-                        start_worker(OP_SET_COLOR, color_target_entity_id, packed, 0.0f, NULL, 0);
+                    if (col >= 0 && col < COLOR_GRID_COLS) {
+                        size_t idx = (size_t)(row * COLOR_GRID_COLS + col);
+                        if (idx < NUM_COLOR_PRESETS) {
+                            int packed = (COLOR_PRESETS[idx].r << 16) | (COLOR_PRESETS[idx].g << 8) | COLOR_PRESETS[idx].b;
+                            start_worker(OP_SET_COLOR, color_target_entity_id, packed, 0.0f, NULL, 0);
+                        }
                     }
                 } else if (color_target_supports_color_temp && touch.py >= temp_top_y &&
                            touch.py < temp_top_y + COLOR_TEMP_CELL_H) {

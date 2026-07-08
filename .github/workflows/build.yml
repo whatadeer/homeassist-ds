@@ -31,6 +31,10 @@ jobs:
       - name: Build CIA
         run: docker run --rm -v ${{ github.workspace }}:/project ha3ds-builder make cia
 
+      - name: Verify build outputs
+        run: |
+          test -f ha3ds.cia && test -f ha3ds.3dsx
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -44,33 +48,48 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
+          # Piped through env instead of interpolated directly into the
+          # script below - ${{ }} expressions are expanded as raw text by
+          # the Actions runner before bash ever sees the script, so a ref
+          # name/repo slug containing shell metacharacters would otherwise
+          # be interpreted as script rather than data.
+          REF_NAME: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
         run: |
           sudo apt-get update -qq && sudo apt-get install -y qrencode
+
+          # Re-running this job for the same tag (workflow re-run, or a
+          # tag deleted and re-pushed) would otherwise fail outright because
+          # gh release create refuses to clobber an existing release.
+          gh release delete "$REF_NAME" --yes || true
 
           # Predictable release-asset URL pattern - the assets below get
           # uploaded to exactly this path by the gh release create call
           # further down, so it's safe to reference before they exist.
-          CIA_URL="https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/ha3ds.cia"
-          QR_URL="https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/ha3ds-qr.png"
+          CIA_URL="https://github.com/$REPO/releases/download/$REF_NAME/ha3ds.cia"
+          QR_URL="https://github.com/$REPO/releases/download/$REF_NAME/ha3ds-qr.png"
 
           # FBI's Remote Install can scan a QR code (camera icon in its
           # network-install menu) instead of typing the URL in by hand.
           qrencode -o ha3ds-qr.png -s 8 -m 2 "$CIA_URL"
 
-          cat > release-notes.md <<'EOF'
+          # Unquoted heredoc so $CIA_URL/$QR_URL expand directly - avoids a
+          # separate sed pass whose `|` delimiter would collide with a `|`
+          # in the URL (only possible if REF_NAME contained one, but the
+          # heredoc sidesteps that entirely rather than relying on ref names
+          # staying delimiter-safe).
+          cat > release-notes.md <<EOF
           ## Install
 
           On your 3DS, open FBI, go to Remote Install, and either scan the
           QR code below with the camera icon or enter the URL manually:
 
-          CIA_URL_PLACEHOLDER
+          $CIA_URL
 
-          ![QR code](QR_URL_PLACEHOLDER)
+          ![QR code]($QR_URL)
           EOF
-          sed -i "s|CIA_URL_PLACEHOLDER|$CIA_URL|" release-notes.md
-          sed -i "s|QR_URL_PLACEHOLDER|$QR_URL|" release-notes.md
 
-          gh release create "${{ github.ref_name }}" \
+          gh release create "$REF_NAME" \
             ha3ds.cia ha3ds.3dsx ha3ds-qr.png \
-            --title "${{ github.ref_name }}" \
+            --title "$REF_NAME" \
             --notes-file release-notes.md

@@ -36,9 +36,16 @@ int app_config_load(app_config_t *cfg) {
     read_line(f, cfg->base_url, sizeof(cfg->base_url));
     read_line(f, cfg->refresh_token, sizeof(cfg->refresh_token));
 
+    // A blank line (no third line at all, i.e. an older two-line config) or
+    // a corrupt/non-numeric one (torn write, manual edit) both parse to 0
+    // here - strtoul() returns 0 on failure same as on a literal "0", and
+    // settings_toggle_domain() never persists 0 itself (it refuses to turn
+    // off the last enabled domain), so 0 is never a legitimately-saved value
+    // and always means "fall back to everything on" rather than "nothing on".
     char mask_line[16];
     read_line(f, mask_line, sizeof(mask_line));
-    cfg->enabled_domains = mask_line[0] ? (unsigned int)strtoul(mask_line, NULL, 10) : HA_ALL_DOMAINS_MASK;
+    unsigned int mask = mask_line[0] ? (unsigned int)strtoul(mask_line, NULL, 10) : 0;
+    cfg->enabled_domains = mask ? mask : HA_ALL_DOMAINS_MASK;
     fclose(f);
 
     return (cfg->base_url[0] && cfg->refresh_token[0]) ? 0 : -1;
