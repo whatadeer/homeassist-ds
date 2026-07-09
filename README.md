@@ -122,3 +122,8 @@ expired-looking certs from a wrong clock are a common false alarm.
   a runtime setting (in-app Settings screen, START from the main list, backed
   by `HA_DOMAINS`/`ha_client_set_enabled_domains()` in `source/ha_client.c`);
   adjust `MAX_ENTITIES` in `source/main.c` if you want more entities overall.
+- Domain icons (`source/pixel_icons.h`) are rectangle geometry lifted from
+  [Pixelarticons](https://github.com/halfmage/pixelarticons) (MIT) — see
+  [CREDITS.md](CREDITS.md). They're drawn with `C2D_DrawRectSolid`, not a
+  texture, so the same shapes are reused at both the small list-row size and
+  the large top-screen "now selected" hero with no loss of crispness.

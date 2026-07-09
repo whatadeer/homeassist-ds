@@ -9,4 +9,6 @@ void dbg_log_init(void);
 void dbg_log(const char *fmt, ...);
 void dbg_log_close(void);
 
+#define LOG(...) dbg_log(__VA_ARGS__)
+
 #endif
