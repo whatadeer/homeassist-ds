@@ -39,7 +39,7 @@ static C2D_Text instructionsText;
 
 void screen_main_init(C2D_Font font, C2D_TextBuf staticBuf) {
     C2D_TextFontParse(&instructionsText, font, staticBuf,
-        "Touch/A: toggle   Up/Down/Stick: move   Y: refresh   X: room   SELECT: sign in\n"
+        "Touch/A: toggle   Up/Down/Stick: move   Y: refresh   X: group   SELECT: sign in\n"
         "Left/Right: dim/temp   L/R: min/max/+-2\xC2\xB0   B: color   START: settings");
     C2D_TextOptimize(&instructionsText);
 }
@@ -127,10 +127,13 @@ void screen_main_handle_input(u32 kDown, int touch_tapped, touchPosition touch) 
     if (kDown & KEY_X) {
         char preserved_id[HA_MAX_ENTITY_ID];
         capture_selected_id(preserved_id, sizeof(preserved_id));
-        group_by_room = !group_by_room;
+        group_mode = (group_mode + 1) % (GROUP_BY_STATUS + 1);
         sort_entities();
         rebuild_visible_list(preserved_id);
-        snprintf(status_msg, sizeof(status_msg), group_by_room ? "Grouped by room" : "Sorted by name");
+        const char *msg = group_mode == GROUP_BY_ROOM ? "Grouped by room"
+            : group_mode == GROUP_BY_STATUS ? "Grouped by status"
+            : "Sorted by name";
+        snprintf(status_msg, sizeof(status_msg), "%s", msg);
     }
     if (kDown & KEY_DUP) {
         move_selection(-1);
@@ -302,14 +305,14 @@ void screen_main_draw(C2D_Font font, C2D_TextBuf dynBuf,
     draw_text(font, dynBuf, filter_display, 6.0f, 4.0f, 0.5f, 0.4f,
         C2D_Color32(0xCC, 0xCC, 0xCC, 0xFF));
 
-    // Persistent "current room" bar: only drawn when scrolled mid-group
-    // (see sticky_room_bar_active()) so a long room's name stays on
+    // Persistent "current group" bar: only drawn when scrolled mid-group
+    // (see sticky_group_bar_active()) so a long group's name stays on
     // screen even once its own header row has scrolled out of view.
-    if (sticky_room_bar_active()) {
+    if (sticky_group_bar_active()) {
         const ha_entity_t *top_entity = &entities[visible_indices[scroll_offset]];
-        C2D_DrawRectSolid(0.0f, (float)FILTER_BOX_HEIGHT, 0.4f, 320.0f, STICKY_ROOM_BAR_HEIGHT,
+        C2D_DrawRectSolid(0.0f, (float)FILTER_BOX_HEIGHT, 0.4f, 320.0f, STICKY_GROUP_BAR_HEIGHT,
             C2D_Color32(0x2a, 0x22, 0x0e, 0xFF));
-        draw_text(font, dynBuf, entity_area_label(top_entity), 8.0f, (float)FILTER_BOX_HEIGHT + 2.0f,
+        draw_text(font, dynBuf, entity_group_label(top_entity), 8.0f, (float)FILTER_BOX_HEIGHT + 2.0f,
             0.5f, 0.36f, C2D_Color32(0xFF, 0xB3, 0x4D, 0xFF));
     }
 
@@ -324,25 +327,26 @@ void screen_main_draw(C2D_Font font, C2D_TextBuf dynBuf,
 
         if (idx == ROW_IS_HEADER) {
             // Section header: a distinct full-width band naming the
-            // room the row(s) below belong to, so grouping reads as
-            // real sections rather than a same-list resort. Its text
-            // comes from the entity right after it, since a header is
-            // only ever emitted immediately before the first entity of
-            // a new area (see rebuild_visible_list). Accent goes on the
-            // left edge, not a line flush along the top - a top line on
-            // the very first header sits right on the seam with the
-            // filter box above it and reads as the header overlapping/
-            // peeking out from underneath it.
+            // group the row(s) below belong to (room or on/off status,
+            // depending on group_mode), so grouping reads as real sections
+            // rather than a same-list resort. Its text comes from the
+            // entity right after it, since a header is only ever emitted
+            // immediately before the first entity of a new group (see
+            // rebuild_visible_list). Accent goes on the left edge, not a
+            // line flush along the top - a top line on the very first
+            // header sits right on the seam with the filter box above it
+            // and reads as the header overlapping/peeking out from
+            // underneath it.
             C2D_DrawRectSolid(0.0f, y, 0.4f, 320.0f, (float)ROW_HEIGHT, C2D_Color32(0x3a, 0x2e, 0x12, 0xFF));
             C2D_DrawRectSolid(0.0f, y, 0.41f, 4.0f, (float)ROW_HEIGHT, C2D_Color32(0xFF, 0xB3, 0x4D, 0xFF));
 
-            const char *area = AREA_UNASSIGNED_LABEL;
+            const char *group = AREA_UNASSIGNED_LABEL;
             if (pos + 1 < visible_count && visible_indices[pos + 1] != ROW_IS_HEADER) {
                 const ha_entity_t *next = &entities[visible_indices[pos + 1]];
-                area = entity_area_label(next);
+                group = entity_group_label(next);
             }
             char header_display[40];
-            snprintf(header_display, sizeof(header_display), "%.36s", area);
+            snprintf(header_display, sizeof(header_display), "%.36s", group);
 
             draw_text(font, dynBuf, header_display, 8.0f, y + 6.0f, 0.5f, 0.44f,
                 C2D_Color32(0xFF, 0xB3, 0x4D, 0xFF));

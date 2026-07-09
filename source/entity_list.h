@@ -20,11 +20,11 @@
 #define VISIBLE_ROWS 8
 #define ROW_HEIGHT 24
 #define FILTER_BOX_HEIGHT 22
-// Height of the persistent "current room" bar shown between the filter box
-// and the list - see sticky_room_bar_active(). Doesn't consume one of the
+// Height of the persistent "current group" bar shown between the filter box
+// and the list - see sticky_group_bar_active(). Doesn't consume one of the
 // VISIBLE_ROWS row slots, just pushes the list's start Y down, so scrolling
 // math (list positions, not pixels) is unaffected by whether it's shown.
-#define STICKY_ROOM_BAR_HEIGHT 16.0f
+#define STICKY_GROUP_BAR_HEIGHT 16.0f
 #define FILTER_MAX_LEN 32
 
 extern ha_entity_t entities[MAX_ENTITIES];
@@ -34,10 +34,10 @@ extern int selected_index;
 
 // Entities matching filter_text (case-insensitive substring of name or
 // entity_id), in original order, interleaved with ROW_IS_HEADER sentinels
-// when group_by_room is on (one before each area's first entity). Header
-// rows are never selectable. selected_index/scroll_offset are positions
-// into THIS list, not directly into `entities` - always go through
-// visible_indices[] to get the real entities[] index.
+// when group_mode isn't GROUP_NONE (one before each group's first entity).
+// Header rows are never selectable. selected_index/scroll_offset are
+// positions into THIS list, not directly into `entities` - always go
+// through visible_indices[] to get the real entities[] index.
 extern char filter_text[FILTER_MAX_LEN];
 extern int visible_indices[MAX_VISIBLE_ROWS];
 extern int visible_count;
@@ -46,12 +46,18 @@ extern int visible_count;
 // visible_count itself includes non-entity header rows when grouped.
 extern int visible_entity_count;
 
-// Toggled by X: sort entities[] by (area, name) instead of just name, and
-// insert a header row before each area's entities so grouping reads as
-// real sections instead of a same-list resort. Room data comes from a
-// separate template-based fetch (ha_fetch_area_map) merged in after every
-// full refresh - see the worker's OP_REFRESH branch.
-extern int group_by_room;
+// Cycled by X. GROUP_BY_ROOM sorts entities[] by (area, name) and inserts a
+// header before each area's entities; room data comes from a separate
+// template-based fetch (ha_fetch_area_map) merged in after every full
+// refresh - see the worker's OP_REFRESH branch. GROUP_BY_STATUS sorts by
+// (active, name) and inserts one header for the active entities and one for
+// the rest, using the same on/off rule as entity_is_active().
+typedef enum {
+    GROUP_NONE = 0,
+    GROUP_BY_ROOM,
+    GROUP_BY_STATUS,
+} group_mode_t;
+extern group_mode_t group_mode;
 
 // True unless the entity's state is exactly "off" - the one state string
 // every domain here agrees means "inactive". Domains that never report
@@ -67,6 +73,13 @@ int entity_is_active(const ha_entity_t *e);
 // real area actually named AREA_UNASSIGNED_LABEL can't merge with the
 // no-area bucket.
 const char *entity_area_label(const ha_entity_t *e);
+
+// Label for an entity's current group under group_mode: entity_area_label()
+// for GROUP_BY_ROOM, "Active"/"Off" for GROUP_BY_STATUS. Used for header-row
+// and sticky-group-bar text, which always reflect the active grouping -
+// unlike entity_area_label(), which the top-screen hero uses unconditionally
+// to show an entity's actual room regardless of how the list is grouped.
+const char *entity_group_label(const ha_entity_t *e);
 
 // Sorts entities[] in place using whichever order is currently selected.
 // Callers must capture_selected_id() before calling this (sorting changes
@@ -101,10 +114,10 @@ void clamp_selection(void);
 void move_selection(int dir);
 
 // True when the top of the current scroll window is mid-group - the
-// area's own header has scrolled above the visible list.
-int sticky_room_bar_active(void);
+// group's own header has scrolled above the visible list.
+int sticky_group_bar_active(void);
 
-// Y where the entity list starts, pushed down when sticky_room_bar_active().
+// Y where the entity list starts, pushed down when sticky_group_bar_active().
 float list_top_y(void);
 
 #endif

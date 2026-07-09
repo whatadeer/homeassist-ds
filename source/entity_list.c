@@ -13,7 +13,7 @@ int visible_indices[MAX_VISIBLE_ROWS];
 int visible_count = 0;
 int visible_entity_count = 0;
 
-int group_by_room = 0;
+group_mode_t group_mode = GROUP_NONE;
 
 int entity_is_active(const ha_entity_t *e) {
     return strcmp(e->state, "off") != 0;
@@ -66,13 +66,13 @@ void move_selection(int dir) {
     clamp_selection();
 }
 
-int sticky_room_bar_active(void) {
-    return group_by_room && scroll_offset >= 0 && scroll_offset < visible_count &&
+int sticky_group_bar_active(void) {
+    return group_mode != GROUP_NONE && scroll_offset >= 0 && scroll_offset < visible_count &&
         visible_indices[scroll_offset] != ROW_IS_HEADER;
 }
 
 float list_top_y(void) {
-    return FILTER_BOX_HEIGHT + (sticky_room_bar_active() ? STICKY_ROOM_BAR_HEIGHT : 0.0f);
+    return FILTER_BOX_HEIGHT + (sticky_group_bar_active() ? STICKY_GROUP_BAR_HEIGHT : 0.0f);
 }
 
 // Case-insensitive string comparison - not relying on newlib providing
@@ -121,13 +121,50 @@ static int compare_entity_area_then_name_ci(const void *a, const void *b) {
     return ci_strcmp(ea->friendly_name, eb->friendly_name);
 }
 
+// Active entities first (more actionable than what's already off), then by
+// name within each of the two buckets.
+static int compare_entity_status_then_name_ci(const void *a, const void *b) {
+    const ha_entity_t *ea = (const ha_entity_t *)a;
+    const ha_entity_t *eb = (const ha_entity_t *)b;
+
+    int a_active = entity_is_active(ea);
+    int b_active = entity_is_active(eb);
+    if (a_active != b_active) {
+        return a_active ? -1 : 1;
+    }
+    return ci_strcmp(ea->friendly_name, eb->friendly_name);
+}
+
 const char *entity_area_label(const ha_entity_t *e) {
     return e->area_name[0] ? e->area_name : AREA_UNASSIGNED_LABEL;
 }
 
+const char *entity_group_label(const ha_entity_t *e) {
+    if (group_mode == GROUP_BY_STATUS) {
+        return entity_is_active(e) ? "Active" : "Off";
+    }
+    return entity_area_label(e);
+}
+
+// Grouping/boundary key for rebuild_visible_list()'s header insertion -
+// distinct from entity_group_label() since a boundary decision needs the
+// raw area_name (see rebuild_visible_list's doc comment on
+// AREA_UNASSIGNED_LABEL), not the resolved display text.
+static const char *entity_group_key(const ha_entity_t *e) {
+    if (group_mode == GROUP_BY_STATUS) {
+        return entity_is_active(e) ? "1" : "0";
+    }
+    return e->area_name;
+}
+
 void sort_entities(void) {
-    qsort(entities, (size_t)entity_count, sizeof(ha_entity_t),
-        group_by_room ? compare_entity_area_then_name_ci : compare_entity_name_ci);
+    int (*cmp)(const void *, const void *) = compare_entity_name_ci;
+    if (group_mode == GROUP_BY_ROOM) {
+        cmp = compare_entity_area_then_name_ci;
+    } else if (group_mode == GROUP_BY_STATUS) {
+        cmp = compare_entity_status_then_name_ci;
+    }
+    qsort(entities, (size_t)entity_count, sizeof(ha_entity_t), cmp);
 }
 
 // Case-insensitive substring search, since newlib's strcasestr availability
@@ -185,34 +222,34 @@ const ha_entity_t *current_selected_entity(void) {
     return &entities[idx];
 }
 
-// When group_by_room is on, a ROW_IS_HEADER sentinel is inserted right
-// before the first entity of each area (entities[] is assumed already
-// sorted by (area, name) - see sort_entities()), so a run of same-area
+// When group_mode isn't GROUP_NONE, a ROW_IS_HEADER sentinel is inserted
+// right before the first entity of each group (entities[] is assumed
+// already sorted to match - see sort_entities()), so a run of same-group
 // entities in the filtered list stays contiguous and gets exactly one
 // header.
 void rebuild_visible_list(const char *preserved_id) {
     visible_count = 0;
     visible_entity_count = 0;
-    // Raw area_name of the last entity added (may be "" for unassigned) -
-    // compared case-insensitively, matching sort_entities()'s comparator, so
-    // a header boundary is never split or merged by casing alone. Compared
-    // on the raw name rather than entity_area_label()'s resolved text, so a
-    // real area actually named AREA_UNASSIGNED_LABEL can't be confused with
-    // the no-area bucket.
-    char last_area[HA_MAX_NAME];
-    int have_last_area = 0;
+    // Grouping key of the last entity added - compared case-insensitively,
+    // matching sort_entities()'s comparators, so a header boundary is never
+    // split or merged by casing alone. For GROUP_BY_ROOM this is the raw
+    // area_name (may be "" for unassigned) rather than entity_group_label()'s
+    // resolved text, so a real area actually named AREA_UNASSIGNED_LABEL
+    // can't be confused with the no-area bucket.
+    char last_key[HA_MAX_NAME];
+    int have_last_key = 0;
     for (int i = 0; i < entity_count; i++) {
         if (!(str_contains_ci(entities[i].friendly_name, filter_text) ||
               str_contains_ci(entities[i].entity_id, filter_text))) {
             continue;
         }
-        if (group_by_room) {
-            const char *raw_area = entities[i].area_name;
-            if (!have_last_area || ci_strcmp(raw_area, last_area) != 0) {
+        if (group_mode != GROUP_NONE) {
+            const char *key = entity_group_key(&entities[i]);
+            if (!have_last_key || ci_strcmp(key, last_key) != 0) {
                 visible_indices[visible_count++] = ROW_IS_HEADER;
-                strncpy(last_area, raw_area, sizeof(last_area) - 1);
-                last_area[sizeof(last_area) - 1] = '\0';
-                have_last_area = 1;
+                strncpy(last_key, key, sizeof(last_key) - 1);
+                last_key[sizeof(last_key) - 1] = '\0';
+                have_last_key = 1;
             }
         }
         visible_indices[visible_count++] = i;
