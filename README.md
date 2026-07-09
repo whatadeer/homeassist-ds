@@ -78,7 +78,7 @@ through sign-in on the console itself:
 
 The app drives Home Assistant's own login flow (`/auth/login_flow` +
 `/auth/token` — the same one the web UI uses) and stores only the
-resulting **refresh token** at `sdmc:/ha3ds.cfg`; your password is never
+resulting **refresh token** at `sdmc:/3ds/ha3ds/ha3ds.cfg`; your password is never
 stored. Short-lived access tokens are minted from it automatically at
 runtime. The session shows up in your HA profile's "Refresh Tokens" list,
 named after your instance URL, and can be revoked there at any time.

@@ -3,7 +3,7 @@
 
 #include "ha_client.h"
 
-// Persisted sign-in state, stored at sdmc:/ha3ds.cfg. The refresh token is
+// Persisted sign-in state, stored at sdmc:/3ds/ha3ds/ha3ds.cfg. The refresh token is
 // long-lived (HA keeps it valid until revoked from the user's profile), so
 // sign-in survives reboots; short-lived access tokens are minted from it at
 // runtime and never stored.

@@ -3,8 +3,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
-#define CONFIG_PATH "sdmc:/ha3ds.cfg"
+// Namespaced under /3ds/ha3ds/ rather than the SD card root - this app is
+// open source and installed on other people's cards, and every other
+// well-behaved homebrew app keeps its files under its own /3ds/<name>/
+// folder instead of scattering them next to boot9strap.firm and everyone
+// else's stuff.
+#define DATA_DIR "sdmc:/3ds/ha3ds"
+#define CONFIG_PATH DATA_DIR "/ha3ds.cfg"
 
 // Format: three lines - base URL, refresh token, enabled-domains bitmask.
 // Plain text on the SD card; anyone with physical card access could read
@@ -15,6 +22,14 @@
 // by older builds only have two lines - read_line() below just leaves the
 // mask blank in that case, and it's treated as "not set" -> all domains on,
 // matching the pre-Settings-screen behavior exactly.
+
+// mkdir() fails (harmlessly) if a path segment already exists - fopen()
+// itself never creates missing parent directories, so this has to run
+// before the first write a fresh SD card could ever see.
+static void ensure_data_dir(void) {
+    mkdir("sdmc:/3ds", 0777);
+    mkdir(DATA_DIR, 0777);
+}
 
 static void read_line(FILE *f, char *out, size_t out_size) {
     out[0] = '\0';
@@ -52,6 +67,7 @@ int app_config_load(app_config_t *cfg) {
 }
 
 int app_config_save(const app_config_t *cfg) {
+    ensure_data_dir();
     FILE *f = fopen(CONFIG_PATH, "w");
     if (!f) {
         return -1;
