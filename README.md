@@ -65,7 +65,27 @@ make cia      # ha3ds.cia         - sideload via FBI on CFW (Luma3DS)
 Copy `ha3ds.cia` to your SD card and install it with
 [FBI](https://github.com/Steveice10/FBI).
 
-## 3. Sign in (on the 3DS)
+## 3. Tests
+
+`tests/` has host-native unit tests (plain gcc, no devkitARM/Podman needed)
+for the modules with logic worth checking without a real 3DS or Home
+Assistant instance: entity sorting/filtering/grouping (`entity_list.c`),
+`/api/states` JSON parsing (`entity_parse.c`), and config load/save
+(`app_config.c`). Everything else - rendering, input handling, networking,
+thread orchestration - is either a thin wrapper around citro2d/curl or so
+entangled with 3DS hardware that a test would mostly be exercising a mock,
+so it's left to manual testing on real hardware/Citra.
+
+Requires gcc and jansson dev headers (`libjansson-dev` on Debian/Ubuntu,
+`jansson` via pacman/brew elsewhere):
+
+```
+make -C tests            # build + run all tests
+make -C tests coverage   # build + run with gcov line coverage
+make -C tests clean
+```
+
+## 4. Sign in (on the 3DS)
 
 No build-time configuration needed. On first launch the app walks you
 through sign-in on the console itself:

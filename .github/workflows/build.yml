@@ -20,6 +20,21 @@ permissions:
   contents: write
 
 jobs:
+  host-tests:
+    # Unit tests for the pure-logic modules (entity_list.c, entity_parse.c,
+    # app_config.c) - plain gcc, no devkitARM/docker image needed, so this
+    # runs in seconds and catches logic bugs before the much slower CIA build
+    # below even starts. See tests/Makefile.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install test dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libjansson-dev pkg-config
+
+      - name: Run host unit tests
+        run: make -C tests
+
   build:
     runs-on: ubuntu-latest
     steps:

@@ -42,8 +42,12 @@ static void read_line(FILE *f, char *out, size_t out_size) {
     }
 }
 
-int app_config_load(app_config_t *cfg) {
-    FILE *f = fopen(CONFIG_PATH, "r");
+// Path-parameterized core of app_config_load()/app_config_save() - split out
+// so tests/test_app_config.c can exercise the parsing/serialization logic
+// against an arbitrary file instead of the real sdmc: card path, which only
+// resolves under libctru and doesn't exist on a host test build.
+int app_config_load_path(const char *path, app_config_t *cfg) {
+    FILE *f = fopen(path, "r");
     if (!f) {
         return -1;
     }
@@ -66,9 +70,8 @@ int app_config_load(app_config_t *cfg) {
     return (cfg->base_url[0] && cfg->refresh_token[0]) ? 0 : -1;
 }
 
-int app_config_save(const app_config_t *cfg) {
-    ensure_data_dir();
-    FILE *f = fopen(CONFIG_PATH, "w");
+int app_config_save_path(const char *path, const app_config_t *cfg) {
+    FILE *f = fopen(path, "w");
     if (!f) {
         return -1;
     }
@@ -76,6 +79,15 @@ int app_config_save(const app_config_t *cfg) {
     int ok = fprintf(f, "%s\n%s\n%u\n", cfg->base_url, cfg->refresh_token, cfg->enabled_domains) > 0;
     fclose(f);
     return ok ? 0 : -1;
+}
+
+int app_config_load(app_config_t *cfg) {
+    return app_config_load_path(CONFIG_PATH, cfg);
+}
+
+int app_config_save(const app_config_t *cfg) {
+    ensure_data_dir();
+    return app_config_save_path(CONFIG_PATH, cfg);
 }
 
 void app_config_delete(void) {
